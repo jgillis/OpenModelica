@@ -2180,6 +2180,122 @@ algorithm
   residuals := listReverse(residuals);
 end fmi3DaeResiduals;
 
+public function fmi3InitialResiduals
+  "OpenModelica extension of fmi-ls-dae: the initial equations as residuals
+   (DAEMODEDATA.initialResidualEquations) as (valueReference, dependency
+   attributes). The value references follow the residuals'
+   (fmi3DaeResiduals). The dependencies are structural, read off the residual
+   expression: states, state derivatives, the algebraic variables of the DAE
+   formulation and inputs, an auxiliary variable of the DAE formulation standing
+   for what its defining equation reads. Parameters, discrete variables and time
+   are not listed (fmi3DaeResiduals does not list them either). A residual
+   reading a variable this cannot place carries no attributes, which the standard
+   reads as a dependency on every known."
+  input SimCode.SimCode simCode;
+  output list<tuple<String, String>> residuals = {};
+protected
+  SimCode.DaeModeData dmd;
+  Integer base;
+  UnorderedMap<DAE.ComponentRef, DAE.Exp> defs;
+  UnorderedSet<DAE.ComponentRef> algebraic;
+  list<Integer> deps;
+  Boolean placed;
+  String attributes;
+algorithm
+  SOME(dmd) := simCode.daeModeData;
+  base := stringInt(getFMI3DaeModeValueReference(simCode)) + 1 + listLength(dmd.residualVars);
+  defs := UnorderedMap.new<DAE.Exp>(ComponentReferenceBasics.hashComponentRef, ComponentReferenceBasics.crefEqual);
+  for eqs in dmd.daeEquations loop
+    for eq in eqs loop
+      () := match eq
+        case SimCode.SES_SIMPLE_ASSIGN()
+          algorithm UnorderedMap.add(eq.cref, eq.exp, defs); then ();
+        case SimCode.SES_SIMPLE_ASSIGN_CONSTRAINTS()
+          algorithm UnorderedMap.add(eq.cref, eq.exp, defs); then ();
+        else ();
+      end match;
+    end for;
+  end for;
+  algebraic := UnorderedSet.fromList(list(v.name for v in dmd.algebraicVars),
+    ComponentReferenceBasics.hashComponentRef, ComponentReferenceBasics.crefEqual);
+  for eq in dmd.initialResidualEquations loop
+    () := match eq
+      case SimCode.SES_RESIDUAL()
+        algorithm
+          (deps, placed) := initialResidualDependencies(Expression.extractCrefsFromExp(eq.exp), simCode, defs, algebraic,
+            UnorderedSet.new(ComponentReferenceBasics.hashComponentRef, ComponentReferenceBasics.crefEqual), {}, true);
+          attributes := "";
+          if placed then
+            deps := List.sortedUnique(List.sort(deps, intGt), intEq);
+            attributes := " dependencies=\"" + stringDelimitList(list(intString(d) for d in deps), " ") + "\" dependenciesKind=\""
+              + stringDelimitList(list("dependent" for d in deps), " ") + "\"";
+          end if;
+          residuals := (intString(base + eq.res_index), attributes) :: residuals;
+        then ();
+      else ();
+    end match;
+  end for;
+  residuals := listReverse(residuals);
+end fmi3InitialResiduals;
+
+protected function initialResidualDependencies
+  "fmi3InitialResiduals: the value references the variables crefs read stand for."
+  input list<DAE.ComponentRef> crefs;
+  input SimCode.SimCode simCode;
+  input UnorderedMap<DAE.ComponentRef, DAE.Exp> defs;
+  input UnorderedSet<DAE.ComponentRef> algebraic;
+  input UnorderedSet<DAE.ComponentRef> visited;
+  input output list<Integer> deps;
+  input output Boolean placed;
+protected
+  SimCodeVar.SimVar sv;
+  Option<DAE.Exp> def;
+algorithm
+  for cr in crefs loop
+    if not placed then
+      return;
+    end if;
+    if UnorderedSet.contains(cr, visited) then
+      continue;
+    end if;
+    UnorderedSet.add(cr, visited);
+    def := UnorderedMap.get(cr, defs);
+    if isSome(def) then
+      (deps, placed) := initialResidualDependencies(Expression.extractCrefsFromExp(Util.getOption(def)), simCode, defs, algebraic, visited, deps, placed);
+      continue;
+    end if;
+    if ComponentReferenceBasics.crefEqual(cr, DAE.crefTime) or ComponentReference.isPreCref(cr) then
+      continue;
+    end if;
+    sv := cref2simvar(cr, simCode);
+    if sv.index == -2 then
+      placed := false;
+    elseif UnorderedSet.contains(sv.name, algebraic) or isFMI3InitialResidualKnown(sv) then
+      deps := stringInt(getFMI3ValueReference(sv, simCode)) :: deps;
+    else
+      placed := match sv.varKind
+        case BackendDAE.PARAM() then true;
+        case BackendDAE.CONST() then true;
+        case BackendDAE.DISCRETE() then true;
+        else sv.isDiscrete;
+      end match;
+    end if;
+  end for;
+end initialResidualDependencies;
+
+protected function isFMI3InitialResidualKnown
+  "A state, a state derivative or an input."
+  input SimCodeVar.SimVar sv;
+  output Boolean b;
+algorithm
+  b := match (sv.varKind, sv.causality)
+    case (BackendDAE.STATE(), _) then true;
+    case (BackendDAE.STATE_DER(), _) then true;
+    case (_, SOME(SimCodeVar.INPUT())) then not sv.isDiscrete;
+    else false;
+  end match;
+end isFMI3InitialResidualKnown;
+
 protected function getNLSysRHS
     input list<SimCode.SimEqSystem> eqs;
     input list<DAE.ComponentRef> res ;

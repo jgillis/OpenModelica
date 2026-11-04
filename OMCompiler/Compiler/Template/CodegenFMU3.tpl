@@ -60,6 +60,7 @@ import CodegenUtil.*;
 import CodegenUtilSimulation.*;
 import CodegenC.*; //unqualified import, no need the CodegenC is optional when calling a template; or mandatory when the same named template exists in this package (name hiding)
 import CodegenFMUCommon.*;
+import ExpressionDumpTpl;
 
 // Code for generating modelDescription.xml file for FMI 3.0.
 template fmiModelDescription(SimCode simCode, String guid, String FMUType, list<String> sourceFiles)
@@ -527,8 +528,23 @@ case SIMCODE(daeModeData=SOME(dmd as DAEMODEDATA(__))) then
   <<
   <Boolean name="_D_daeMode" valueReference="<%daeModeVR%>" causality="structuralParameter" variability="fixed" start="false" description="Set to true to enable DAE mode as defined by FMI-LS-DAE."/>
   <%dmd.residualVars |> var => DaeResidualVariable3(var, daeModeVR) ;separator="\n"%>
+  <%dmd.initialResidualEquations |> eq => InitialResidualVariable3(eq, intAdd(stringInt(daeModeVR), intAdd(1, listLength(dmd.residualVars)))) ;separator="\n"%>
   >>
 end DaeModeVariables3;
+
+template InitialResidualVariable3(SimEqSystem eq, Integer firstVR)
+ "OpenModelica extension of fmi-ls-dae: one initial equation as residual lhs - rhs,
+  listed in the manifest's org.openmodelica annotation (fmiLsDaeManifest)."
+::=
+match eq
+case SES_RESIDUAL(__) then
+  '<Float64 name="_D_INITres<%res_index%>" valueReference="<%intAdd(firstVR, res_index)%>" causality="local" variability="continuous" initial="calculated" description="<%Util.escapeModelicaStringToXmlString(initialResidualDescription(exp))%>"/>'
+end InitialResidualVariable3;
+
+template initialResidualDescription(Exp exp)
+::=
+  'initial-equation residual <%ExpressionDumpTpl.dumpExp(exp,"\"")%>'
+end initialResidualDescription;
 
 template DaeResidualVariable3(SimVar simVar, String daeModeVR)
 ::=
@@ -584,6 +600,7 @@ case SIMCODE(daeModeData=SOME(dmd as DAEMODEDATA(__)), modelStructure=modelStruc
     '<ContinuousStateDerivative valueReference="<%vr%>" dependencies="<%vr%>" dependenciesKind="constant"/>' ;separator="\n")
   let indicators = EventIndicators3(simCode)
   let residuals = (SimCodeCodegenUtil.fmi3DaeResiduals(simCode) |> (vr, dependencyAttributes) => DaeResidual3(vr, dependencyAttributes) ;separator="\n")
+  let initialResiduals = (SimCodeCodegenUtil.fmi3InitialResiduals(simCode) |> (vr, dependencyAttributes) => DaeResidual3(vr, dependencyAttributes) ;separator="\n")
   let _ = SimCodeCodegenUtil.clearFMI3ValueReferences()
   <<
   <fmiDAEManifest
@@ -603,6 +620,16 @@ case SIMCODE(daeModeData=SOME(dmd as DAEMODEDATA(__)), modelStructure=modelStruc
       <%indicators%>
       <%residuals%>
     </ModelStructure>
+    <%if initialResiduals then
+    <<
+    <Annotations>
+      <Annotation type="org.openmodelica.fmi-ls-dae.initial-residuals">
+        <InitialResiduals>
+          <%initialResiduals%>
+        </InitialResiduals>
+      </Annotation>
+    </Annotations>
+    >>%>
   </fmiDAEManifest>
   >>
 end fmiLsDaeManifest;

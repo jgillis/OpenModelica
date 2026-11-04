@@ -1183,7 +1183,8 @@ template simulationFile_dae(SimCode simCode)
     case SIMCODE(modelInfo=MODELINFO(vars=SIMVARS(__)),
         daeModeData=SOME(DAEMODEDATA(daeEquations=daeEquations, sparsityPattern=sparsityPattern,
                                      algebraicVars=algebraicVars, residualVars=residualVars,
-                                     auxiliaryVars=auxiliaryVars))) then
+                                     auxiliaryVars=auxiliaryVars,
+                                     initialResidualEquations=initialResidualEquations))) then
       let modelNamePrefixStr = modelNamePrefix(simCode)
       let initDAEmode =
         match sparsityPattern
@@ -1204,6 +1205,8 @@ template simulationFile_dae(SimCode simCode)
       #endif
 
       <%evaluateDAEResiduals(daeEquations, fileNamePrefix, fullPathPrefix, modelNamePrefixStr)%>
+
+      <%evaluateInitialDAEResiduals(initialResidualEquations, modelNamePrefixStr)%>
 
       <%initDAEmode%>
 
@@ -5424,6 +5427,57 @@ template evaluateDAEResiduals(list<list<SimEqSystem>> resEquations, String fileN
   >>
 end evaluateDAEResiduals;
 
+template evaluateInitialDAEResiduals(list<SimEqSystem> initialResiduals, String modelNamePrefix)
+ "OpenModelica extension of fmi-ls-dae: the model's initial-equation section as
+  residuals lhs - rhs (SimCode DAEMODEDATA.initialResidualEquations), written to
+  daeModeData->initialResidualVars. Reads the variables as evaluateDAEResiduals
+  does and computes no auxiliary variable itself: the caller evaluates
+  evaluateDAEResiduals at the same point first."
+::=
+  let &varDecls = buffer ""
+  let &varFrees = buffer ""
+  let &auxFunction = buffer ""
+  let body = (initialResiduals |> eq =>
+    match eq
+    case SES_RESIDUAL(__) then
+      let &preExp = buffer ""
+      let expPart = daeExp(exp, contextDAEmode, &preExp, &varDecls, &varFrees, &auxFunction)
+      <<
+      <%preExp%>
+      res[<%res_index%>] = <%expPart%>; /* <%System.stringReplace(ExpressionDumpTpl.dumpExp(exp,"\""), "*/", "* /")%> */
+      >>
+    ;separator="\n")
+  let n = listLength(initialResiduals)
+  <<
+  <%auxFunction%>
+  /* OpenModelica extension of fmi-ls-dae: the initial equations as residuals */
+  OMC_DISABLE_OPT
+  int <%symbolName(modelNamePrefix,"evaluateInitialDAEResiduals")%>(DATA *data, threadData_t *threadData)
+  {
+    modelica_real *res = data->simulationInfo->daeModeData->initialResidualVars;
+    <%varDecls%>
+    <%body%>
+    <%varFrees%>
+    return 0;
+  }
+
+  static void <%symbolName(modelNamePrefix,"initializeInitialDAEResiduals")%>(DAEMODE_DATA* daeModeData)
+  {
+    daeModeData->nInitialResidualVars = <%n%>;
+    <%if intGt(listLength(initialResiduals), 0) then
+    <<
+    daeModeData->initialResidualVars = (modelica_real*) calloc(<%n%>, sizeof(modelica_real));
+    daeModeData->evaluateInitialDAEResiduals = <%symbolName(modelNamePrefix,"evaluateInitialDAEResiduals")%>;
+    >>
+    else
+    <<
+    daeModeData->initialResidualVars = NULL;
+    daeModeData->evaluateInitialDAEResiduals = NULL;
+    >>%>
+  }
+  >>
+end evaluateInitialDAEResiduals;
+
 template genVarIndexes(list<SimVar> vars, String arrayName)
 "This template generates array with indexes of given variables."
 ::=
@@ -5486,6 +5540,7 @@ template initializeDAEmodeData(Integer nResVars, list<SimVar> algVars, Integer n
 
     /* write color array */
     <%colorString%>
+    <%symbolName(modelNamePrefix,"initializeInitialDAEResiduals")%>(daeModeData);
     return 0;
   }
   >>
@@ -5539,6 +5594,7 @@ match sparsityMatrix
 
       computeColumnColoring(daeModeData->sparsePattern, <%nRows%>, <%nCols%>);
       sortSparseColumns(daeModeData->sparsePattern, <%nCols%>);
+      <%symbolName(modelNamePrefix,"initializeInitialDAEResiduals")%>(daeModeData);
 
       _return: OMC_LABEL_UNUSED ;
       <%varFreesC%>

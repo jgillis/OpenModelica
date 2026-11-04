@@ -615,6 +615,11 @@ typedef struct DAEMODE_DATA
   SPARSE_PATTERN* sparsePattern;       /* daeMode sparse pattern */
   int (*evaluateDAEResiduals)(DATA*, threadData_t*, int); /* function to evaluate dynamic equations for DAE solver */
   int *algIndexes;                     /* index of the algebraic DAE variable in original order */
+  /* OpenModelica extension of fmi-ls-dae: the initial-equation section as residuals
+   * (lhs - rhs), evaluated at the current point after evaluateDAEResiduals */
+  long nInitialResidualVars;           /* number of initial residuals */
+  modelica_real* initialResidualVars;  /* workspace for the initial residuals */
+  int (*evaluateInitialDAEResiduals)(DATA*, threadData_t*); /* NULL without initial residuals */
 } DAEMODE_DATA;
 
 typedef struct INLINE_DATA
