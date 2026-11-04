@@ -58,8 +58,8 @@ A Model Exchange FMU exported from a ``--daeMode`` model with
 importer switches the FMU into DAE mode with the structural parameter the
 manifest names (``EnableDAEParameter``), sets the states, their derivatives and
 the algebraic variables, and reads the residuals back. fmi-ls-dae itself says
-nothing about how the model is initialized: in Initialization Mode the FMU runs
-its own causalized initialization.
+nothing about how the model is initialized; in DAE mode OpenModelica leaves it
+to the importer (see `FMI-LS-DAE: Initialization Mode in DAE mode`_).
 
 An importer that treats the initial time as part of its own problem (for
 example a direct-collocation optimizer, with the initial states and their
@@ -95,13 +95,43 @@ ignores:
   numbered right after the fmi-ls-dae residuals.
 - They are read with ``fmi3GetFloat64`` like the residuals, at the point the
   importer has set (time, states, derivatives, algebraic variables, inputs and
-  parameters), in Continuous-Time, Event and Initialization Mode. In
-  Initialization Mode the point is the one the FMU's initialization computed, so
-  the residuals are zero there up to its tolerance.
+  parameters), in Continuous-Time, Event and Initialization Mode. In DAE mode
+  the point in Initialization Mode is the start values with the importer's
+  sets; in ODE mode it is the one the FMU's initialization computed, so the
+  residuals are zero there up to its tolerance.
 - ``dependencies`` lists the states, state derivatives, algebraic variables and
   continuous inputs the residual depends on structurally, including through the
   auxiliary variables of the DAE formulation; parameters and discrete variables
   are not listed. A residual without the attributes may depend on every known.
+
+FMI-LS-DAE: Initialization Mode in DAE mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In DAE mode the importer owns the states, their derivatives and the algebraic
+variables, and so their initialization: it solves for a consistent initial
+point itself, imposing the initial residuals above where it wants the model's
+``initial equation`` sections. The FMU therefore does not run its own
+initialization once ``EnableDAEParameter`` is set:
+``fmi3EnterInitializationMode`` and ``fmi3ExitInitializationMode`` succeed at
+any start values, which become the variables' values as with
+``-iim=none``: the ``start`` attributes, overridden by what the importer set
+while Instantiated or in Initialization Mode, and the parameters with their
+bindings evaluated. The initial system is not solved. The bookkeeping that
+evaluates the model (relations, the discrete start values, delay buffers, event
+indicators, and the discrete-state update that closes the initialization in
+Event Mode) is attempted, and where it fails at the start values the discrete
+variables keep their start values instead of the call failing. The first
+getter evaluates the residuals at the point the importer has set by then. In
+ODE mode (``EnableDAEParameter`` false) Initialization Mode is unchanged.
+
+The DAE switch alone decides this, without a second opt-in parameter: an
+fmi-ls-dae importer sets the states, derivatives and algebraic variables in DAE
+mode anyway, so a consistent initial point computed by the FMU would be
+overwritten, and the FMU's own solve can fail at start values that are only
+placeholders for the importer (``x^(7/3)`` of a negative start value, say),
+which would make the FMU unusable in DAE mode. An importer that wants
+OpenModelica's initialization can run an instance in ODE mode and read the
+initial point from it.
 
 Supported Capability Flags
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

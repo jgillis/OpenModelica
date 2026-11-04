@@ -2776,6 +2776,62 @@ fn init_model(
     Ok(())
 }
 
+/// fmi-ls-dae, DAE mode: the importer owns the initialization, so the FMU's own
+/// is reduced to what cannot fail at an arbitrary point. The start values (the
+/// importer's sets among them, as overrides) and the bound parameters become the
+/// slots, as `-iim=none` leaves them, and the sample schedule is set up; the
+/// initial system is not solved. The event bookkeeping that evaluates the model
+/// (relations, the discrete fixed point, delay buffers, zero crossings) is
+/// attempted, and where it fails the discrete start values stay.
+pub fn run_initialization_by_importer(
+    e: &mut dyn SimEngine,
+    sim_data: u32,
+    layout: &SimLayout,
+    start_time: f64,
+) -> Result<()> {
+    INIT_NOTICE_LOGGED.store(false, Ordering::Relaxed);
+    rtclock::enter_init();
+    write_time(e, sim_data, start_time)?;
+    e.call1_if_present("functionInitDelay", sim_data)?;
+    omclog::info(omclog::INIT, false, "### START INITIALIZATION ###");
+    let _ = rethrow_store::take();
+    seed_start_values(e, sim_data, layout, &[], None)?;
+    log_init_method("none", "fmi-ls-dae DAE mode: the importer initializes, the variables keep their start values");
+    write_i32(e, sim_data + layout.initial_off, 1)?;
+    seed_pre_from_live(e, sim_data, layout)?;
+    save_old_real(e, sim_data, layout)?;
+    if layout.n_samples > 0 {
+        e.call1("initSample", sim_data)?;
+    }
+    let events = (|| -> Result<()> {
+        refresh_relations(e, sim_data, layout)?;
+        iterate_discrete(e, sim_data, layout)?;
+        store_relations(e, sim_data, layout)?;
+        update_relations_pre(e, sim_data, layout)?;
+        store_operators(e, sim_data, layout)?;
+        if layout.n_zc > 0 {
+            save_zc_pre(e, sim_data, layout)?;
+            e.call2(MODEL_FN_ZC, sim_data, sim_data + layout.zc_off)?;
+        }
+        Ok(())
+    })();
+    if let Err(err) = events {
+        omclog::info!(
+            omclog::INIT,
+            false,
+            "the discrete start values stay: evaluating the model at the start values failed ({err})"
+        );
+    }
+    let _ = rethrow_store::take();
+    write_i32(e, sim_data + layout.nls_fail_off, 0)?;
+    write_i32(e, sim_data + layout.rel_fresh_off, 0)?;
+    write_i32(e, sim_data + layout.initial_off, 0)?;
+    omclog::info(omclog::INIT, false, "### END INITIALIZATION ###");
+    rtclock::accumulate(rtclock::INIT);
+    signal_init_done();
+    Ok(())
+}
+
 fn run_initialization_impl(
     e: &mut dyn SimEngine,
     sim_data: u32,

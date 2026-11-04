@@ -885,6 +885,11 @@ struct MeState<E: FmiHost + 'static> {
     /// algebraic unknowns behind, so the refresh below need not solve for them
     /// again. Only a Co-Simulation step can promise that; any set clears it.
     dae_current: bool,
+    /// DAE mode, between `fmi3ExitInitializationMode` and the first discrete-state
+    /// update or Continuous-Time Mode: the event iteration that closes the
+    /// initialization runs at the start values, which the importer has not made
+    /// consistent, so it may fail without failing the call.
+    dae_init_event: bool,
     /// C's `_need_update`, consumed by `update_if_needed`.
     need_update: bool,
     /// `set-input-derivatives`: the first-order derivative of each Real input slot,
@@ -1358,7 +1363,9 @@ impl<E: FmiHost + 'static> MeState<E> {
         }
         // The point moved, so a Jacobian assembled at the old one is stale.
         self.jacobian_valid = false;
-        if self.mode == Mode::Init {
+        if self.mode == Mode::Init && self.dae_mode {
+            self.run_init_by_importer().map_err(err_status)?;
+        } else if self.mode == Mode::Init {
             self.run_init().map_err(err_status)?;
         } else {
             self.evaluate(|m| m.eval())?;
@@ -1472,6 +1479,29 @@ impl<E: FmiHost + 'static> MeState<E> {
             self.sync = Some(sync);
         }
         // After the init equations, so they land in the slots last.
+        for (off, val) in core::mem::take(&mut self.init_string_overrides) {
+            self.write_string(off, &val);
+        }
+        Ok(())
+    }
+
+    /// fmi-ls-dae, DAE mode: the importer owns the initialization (it sets the
+    /// states, derivatives and algebraic variables, and imposes the initial
+    /// residuals itself), so Initialization Mode solves nothing: the start values,
+    /// with the importer's sets, are the slots (`run_initialization_by_importer`).
+    fn run_init_by_importer(&mut self) -> driver::Result<()> {
+        set_param_overrides(
+            self.init_overrides.clone(),
+            self.init_start_overrides.clone(),
+            Vec::new(),
+        );
+        let start_time = self.read_f64(TIME_OFF);
+        driver::run_initialization_by_importer(&mut self.engine, self.sim_data, &self.layout, start_time)?;
+        if !self.meta.clocks.is_empty() {
+            let mut sync = openmodelica_sim_meta::sync::Sync::new(&mut self.engine, &self.meta, self.sim_data)?;
+            sync.take_fired(&mut self.engine, start_time)?;
+            self.sync = Some(sync);
+        }
         for (off, val) in core::mem::take(&mut self.init_string_overrides) {
             self.write_string(off, &val);
         }
@@ -1693,6 +1723,7 @@ fn new_state() -> Option<MeState<Engine>> {
         dae_mode: false,
         configuring: false,
         dae_current: false,
+        dae_init_event: false,
         need_update: true,
         #[cfg(feature = "cs")]
         input_ders: Vec::new(),
@@ -1736,6 +1767,7 @@ macro_rules! me_instance_methods {
     (@vis $($vis:tt)?) => {
     $($vis)? fn enter_continuous_time_mode(&self) -> Status {
         let mut st = self.st.borrow_mut();
+        st.dae_init_event = false;
         st.continuous_time = true;
         st.event_mode = false;
         Status::Ok
@@ -2005,6 +2037,12 @@ macro_rules! shared_instance_methods {
         if let Err(status) = st.update_if_needed() {
             return status;
         }
+        // In DAE mode the initialization evaluated nothing: the first getter after
+        // it evaluates the residuals at whatever point the importer has set.
+        if st.dae_mode {
+            st.need_update = true;
+            st.dae_init_event = true;
+        }
         st.mode = Mode::Ready;
         // Exiting Initialization Mode leaves the instance in Event Mode.
         st.event_mode = true;
@@ -2072,8 +2110,28 @@ macro_rules! shared_instance_methods {
         if !matches!(settled, Ok(false)) {
             st.assert_logged = false;
         }
+        let init_event = core::mem::take(&mut st.dae_init_event);
         let u = match updated {
             Ok(u) => u,
+            Err(err) if init_event => {
+                // DAE mode: the discrete variables keep their start values.
+                omclog::info!(
+                    omclog::EVENTS,
+                    false,
+                    "fmi-ls-dae DAE mode: the event iteration after the initialization failed at the start values ({err}); the discrete variables keep their start values"
+                );
+                let off = st.layout.nls_fail_off;
+                st.write_i32(off, 0);
+                st.need_update = true;
+                return Ok(DiscreteStatesInfo {
+                    new_discrete_states_needed: false,
+                    terminate_simulation: false,
+                    nominals_of_continuous_states_changed: false,
+                    values_of_continuous_states_changed: false,
+                    next_event_time_defined: false,
+                    next_event_time: 0.0,
+                });
+            }
             Err(err) => return Err(failed(&mut st.engine, sim_data, err)),
         };
         if let Err(err) = settled {
@@ -2167,15 +2225,22 @@ macro_rules! shared_instance_methods {
         // current point, which `update_if_needed` brought up to date (in
         // Initialization Mode by the initial solve, which leaves the DAE's own
         // auxiliaries to the residual function).
+        // In DAE mode Initialization Mode solves nothing (`run_init_by_importer`), so
+        // the residuals are evaluated here, at the point the importer has set.
         let init_res_vr = st.dae_enable_vr + 1 + st.layout.n_dae_res;
-        if st.dae_enable_vr != 0 && vrs.iter().any(|&vr| vr >= init_res_vr) {
-            let init = st.mode == Mode::Init;
+        let want_init_res = st.dae_enable_vr != 0 && vrs.iter().any(|&vr| vr >= init_res_vr);
+        let want_res = st.dae_enable_vr != 0 && vrs.iter().any(|&vr| vr > st.dae_enable_vr);
+        let init = st.mode == Mode::Init;
+        if want_init_res || (init && st.dae_mode && want_res) {
             st.evaluate(|m| {
                 let sd = m.sim_data;
                 if init {
                     m.engine.call2(driver::MODEL_FN_DAE, sd, eval_stage::DYNAMIC | eval_stage::ALGEBRAIC)?;
                 }
-                m.engine.call1_if_present("evaluateInitialDAEResiduals", sd)
+                if want_init_res {
+                    m.engine.call1_if_present("evaluateInitialDAEResiduals", sd)?;
+                }
+                Ok(())
             })?;
         }
         let mut out = Vec::with_capacity(vrs.len());
@@ -2809,6 +2874,7 @@ impl<E: FmiHost + 'static> Instance<E> {
             dae_mode: false,
             configuring: false,
             dae_current: false,
+            dae_init_event: false,
             need_update: true,
             #[cfg(feature = "cs")]
             input_ders: Vec::new(),
