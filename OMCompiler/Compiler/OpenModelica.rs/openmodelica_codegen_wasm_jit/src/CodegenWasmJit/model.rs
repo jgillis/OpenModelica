@@ -1201,6 +1201,8 @@ pub(super) fn build_sim_model(
                     .sparsityPattern
                     .as_ref()
                     .and_then(|jm| jac_pattern_info(jm, dae_res_vars.len())),
+                // The DAE-mode Jacobian of an fmi-ls-dae FMU is the C+Rust runtime's.
+                jac: None,
             })
         })
         .transpose()?;

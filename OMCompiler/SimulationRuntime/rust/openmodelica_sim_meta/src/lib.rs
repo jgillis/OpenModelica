@@ -1333,6 +1333,28 @@ pub struct DaeInfo {
     /// `daeModeData->sparsePattern`: `∂F/∂(y, y')` with its coloring. `None` ⇒ no
     /// pattern, which the KLU linear solver cannot work without.
     pub sparsity: Option<JacAInfo>,
+    /// fmi-ls-dae FMU: the symbolic DAE-mode Jacobian. `None` ⇒ none generated.
+    pub jac: Option<DaeJac>,
+}
+
+/// fmi-ls-dae FMU: C's `analyticJacobians[INDEX_JAC_A]` of a `--daeMode` model,
+/// `J(cj) = ∂F/∂(x, z, u) + cj·∂F/∂x'` (DAE-mode differentiation turns `der(x)`
+/// into `cj·x.Seed`). One `functionJacA_column` call is `J(cj)·seed`.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct DaeJac {
+    /// The `SimData` slot of each column's variable: a state, an algebraic unknown
+    /// ([`DaeInfo::alg_offs`]) or an input. A state column stands for the state's
+    /// derivative too (through `cj`).
+    pub col_offs: Vec<u32>,
+    /// Seed slot per column.
+    pub seed_offs: Vec<u32>,
+    /// Result slot per row: the residuals, then the initial residuals (an
+    /// OpenModelica extension) where the model has them.
+    pub result_offs: Vec<u32>,
+    /// The slot of C's `jacobian->dae_cj`.
+    pub cj_off: u32,
+    /// `functionJacA_constantEqns` has a body.
+    pub has_constant: bool,
 }
 
 /// `--linearizationDumpLanguage`: the frame, the matrix rendering and the
@@ -2504,6 +2526,17 @@ pub fn encode(m: &SimMeta) -> Vec<u8> {
             o.push(1);
             put_u32s(&mut o, &d.alg_offs);
             put_jac(&mut o, &d.sparsity);
+            match &d.jac {
+                None => o.push(0),
+                Some(j) => {
+                    o.push(1);
+                    put_u32s(&mut o, &j.col_offs);
+                    put_u32s(&mut o, &j.seed_offs);
+                    put_u32s(&mut o, &j.result_offs);
+                    put_u32(&mut o, j.cj_off);
+                    o.push(j.has_constant as u8);
+                }
+            }
         }
     }
     put_u32(&mut o, m.clocks.len() as u32);
@@ -3079,6 +3112,16 @@ pub fn decode(bytes: &[u8]) -> Result<SimMeta, &'static str> {
         _ => Some(DaeInfo {
             alg_offs: r.u32s()?,
             sparsity: r.jac()?,
+            jac: match r.u8()? {
+                0 => None,
+                _ => Some(DaeJac {
+                    col_offs: r.u32s()?,
+                    seed_offs: r.u32s()?,
+                    result_offs: r.u32s()?,
+                    cj_off: r.u32()?,
+                    has_constant: r.u8()? != 0,
+                }),
+            },
         }),
     };
     let nclocks = r.u32()? as usize;
@@ -3668,6 +3711,13 @@ mod tests {
                     colors: vec![vec![0, 2], vec![1, 3]],
                     rows_by_col: vec![vec![0], vec![0, 1], vec![2], vec![2, 3]],
                     sym: None,
+                }),
+                jac: Some(DaeJac {
+                    col_offs: vec![16, 32, 48, 40, 24],
+                    seed_offs: vec![800, 808, 816, 824, 832],
+                    result_offs: vec![840, 848, 856, 864, 872],
+                    cj_off: 880,
+                    has_constant: true,
                 }),
             }),
             clocks: vec![BaseClockMeta {

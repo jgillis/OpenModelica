@@ -823,6 +823,18 @@ impl Vrs {
 }
 
 // ── Instance state ───────────────────────────────────────────────────────────
+/// fmi-ls-dae FMU: a column of the DAE-mode Jacobian a known value reference
+/// stands for — a state, a state's derivative (which shares the state's column,
+/// through `cj`), or any other column (an algebraic unknown or an input).
+#[derive(Clone, Copy)]
+enum DaeKnown {
+    X(usize),
+    Xdot(usize),
+    Col(usize),
+    /// A Float64 the Jacobian has no column for (time, a parameter), at this slot.
+    Fd(u32),
+}
+
 /// C's `ModelState`, as far as the component acts on it.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -1078,6 +1090,241 @@ impl<E: FmiHost + 'static> MeState<E> {
         let off = self.vrs.resolve(vr).filter(|v| v.negate == Neg::None)?.off;
         let i = off.checked_sub(REAL_OFF)? / 8;
         (i >= self.layout.n_states && i < 2 * self.layout.n_states).then_some((i - self.layout.n_states) as usize)
+    }
+
+    /// fmi-ls-dae FMU: where a known sits among the DAE-mode Jacobian's columns,
+    /// with the sign of its value-reference alias.
+    fn dae_known(&self, jac: &openmodelica_sim_meta::DaeJac, vr: u32) -> Option<(DaeKnown, f64)> {
+        let e = self.vrs.resolve(vr).filter(|e| e.wty == WTy::F64)?;
+        let sign = match e.negate {
+            Neg::None => 1.0,
+            Neg::Arith => -1.0,
+            Neg::Not => return None,
+        };
+        let ns = self.layout.n_states;
+        let der = e.off >= REAL_OFF + ns * 8 && e.off < REAL_OFF + 2 * ns * 8;
+        let off = if der { e.off - ns * 8 } else { e.off };
+        let Some(c) = jac.col_offs.iter().position(|&o| o == off) else {
+            // Time or a parameter: no column, differenced (`dae_forward_dae`).
+            return (!der).then_some((DaeKnown::Fd(e.off), sign));
+        };
+        Some((if der { DaeKnown::Xdot(c) } else if off < REAL_OFF + ns * 8 { DaeKnown::X(c) } else { DaeKnown::Col(c) }, sign))
+    }
+
+    /// fmi-ls-dae FMU: the row of the DAE-mode Jacobian a residual (or an initial
+    /// residual) value reference names.
+    fn dae_row(&self, jac: &openmodelica_sim_meta::DaeJac, vr: u32) -> Option<usize> {
+        let first = self.dae_enable_vr.checked_add(1).filter(|_| self.dae_enable_vr != 0)?;
+        let row = vr.checked_sub(first)? as usize;
+        (row < jac.result_offs.len()).then_some(row)
+    }
+
+    /// fmi-ls-dae FMU: the position among the explicit solve's unknowns `(x', z)`
+    /// of a column's variable: a state's derivative or an algebraic unknown. `None`
+    /// for an input column.
+    fn dae_unknown_index(&self, jac: &openmodelica_sim_meta::DaeJac, c: usize) -> Option<usize> {
+        let off = jac.col_offs[c];
+        let ns = self.layout.n_states;
+        if off >= REAL_OFF && off < REAL_OFF + ns * 8 {
+            return Some(((off - REAL_OFF) / 8) as usize);
+        }
+        let alg = &self.meta.dae.as_ref()?.alg_offs;
+        alg.iter().position(|&o| o == off).map(|k| ns as usize + k)
+    }
+
+    /// fmi-ls-dae FMU, in DAE mode: `dF/d(knowns)·seed` for the residual rows
+    /// asked for, from the symbolic DAE-mode Jacobian `J(cj)`. A `der(x)` seed `b`
+    /// goes in through `cj`: `J(0)·(a - b, s_z, s_u) + J(1)·(b, 0, 0)` is
+    /// `F_x·a + F_x'·b + F_z·s_z + F_u·s_u`, so one evaluation without `der(x)`
+    /// seeds and two with.
+    fn dae_forward_dae(&mut self, rows: &[usize], knowns: &[(DaeKnown, f64)], seed: &[f64]) -> Result<Vec<f64>, Status> {
+        let jac = self.meta.dae.as_ref().and_then(|d| d.jac.clone()).ok_or(Status::Error)?;
+        let (nc, nr) = (jac.seed_offs.len(), jac.result_offs.len());
+        let mut a = vec![0.0; nc];
+        let mut b = vec![0.0; nc];
+        let mut with_der = false;
+        let mut fd: Vec<(u32, f64)> = Vec::new();
+        for (&(k, sign), &s) in knowns.iter().zip(seed) {
+            match k {
+                DaeKnown::X(c) | DaeKnown::Col(c) => a[c] += sign * s,
+                DaeKnown::Xdot(c) => {
+                    a[c] -= sign * s;
+                    b[c] += sign * s;
+                    with_der |= s != 0.0;
+                }
+                DaeKnown::Fd(off) if s != 0.0 => fd.push((off, sign * s)),
+                DaeKnown::Fd(_) => {}
+            }
+        }
+        let mut out = vec![0.0; nr];
+        let mut out1 = vec![0.0; nr];
+        self.dae_jacobian_point()?;
+        self.evaluate(|m| {
+            let sd = m.sim_data;
+            driver::eval_dae_jacobian(&mut m.engine, sd, &jac, 0.0, &a, &mut out)?;
+            if with_der {
+                driver::eval_dae_jacobian(&mut m.engine, sd, &jac, 1.0, &b, &mut out1)?;
+            }
+            Ok(())
+        })?;
+        if !fd.is_empty() {
+            // Time and parameters: a central difference along their seeds, the
+            // residual function rerun at the point afterwards for its auxiliaries.
+            let h = 1e-6 * fd.iter().map(|&(off, _)| self.read_f64(off).abs()).fold(1.0, f64::max)
+                / fd.iter().map(|&(_, s)| s * s).sum::<f64>().sqrt();
+            let saved: Vec<f64> = fd.iter().map(|&(off, _)| self.read_f64(off)).collect();
+            let mut rp = Vec::new();
+            for step in [h, -h] {
+                for (&(off, s), &v) in fd.iter().zip(&saved) {
+                    self.write_f64(off, v + step * s);
+                }
+                rp.push(self.dae_residual_rows(rows)?);
+            }
+            for (&(off, _), &v) in fd.iter().zip(&saved) {
+                self.write_f64(off, v);
+            }
+            self.dae_residual_rows(rows)?;
+            return Ok(rows
+                .iter()
+                .enumerate()
+                .map(|(k, &r)| out[r] + out1[r] + (rp[0][k] - rp[1][k]) / (2.0 * h))
+                .collect());
+        }
+        Ok(rows.iter().map(|&r| out[r] + out1[r]).collect())
+    }
+
+    /// fmi-ls-dae FMU, in ODE mode: the model solves `F(x, x', z, u) = 0` for `x'`
+    /// and `z`, so `[F_x' F_z]·(dx', dz) = -(F_x·dx + F_u·du)`, assembled from the
+    /// DAE-mode Jacobian at the point the explicit solve left behind. `unknowns`
+    /// index `(x', z)`; the knowns are states and inputs.
+    fn dae_forward_ode(&mut self, unknowns: &[usize], knowns: &[(DaeKnown, f64)], seed: &[f64]) -> Result<Vec<f64>, Status> {
+        let jac = self.meta.dae.as_ref().and_then(|d| d.jac.clone()).ok_or(Status::Error)?;
+        let n = self.layout.n_dae_res as usize;
+        let (nc, nr) = (jac.seed_offs.len(), jac.result_offs.len());
+        if nr < n {
+            return Err(Status::Error);
+        }
+        let mut rhs_seed = vec![0.0; nc];
+        for (&(k, sign), &s) in knowns.iter().zip(seed) {
+            match k {
+                DaeKnown::X(c) => rhs_seed[c] += sign * s,
+                DaeKnown::Col(c) if self.dae_unknown_index(&jac, c).is_none() => rhs_seed[c] += sign * s,
+                _ => return Err(Status::Error),
+            }
+        }
+        let cols: Vec<(usize, usize, bool)> = (0..nc)
+            .filter_map(|c| {
+                let u = self.dae_unknown_index(&jac, c)?;
+                Some((c, u, u < self.layout.n_states as usize))
+            })
+            .collect();
+        if cols.len() != n {
+            return Err(Status::Error);
+        }
+        self.dae_jacobian_point()?;
+        // Row-major `n×n` iteration matrix and the right-hand side.
+        let mut m_mat = vec![0.0; n * n];
+        let mut rhs = vec![0.0; nr];
+        self.evaluate(|m| {
+            let sd = m.sim_data;
+            let mut e0 = vec![0.0; nr];
+            let mut e1 = vec![0.0; nr];
+            let mut unit = vec![0.0; nc];
+            for &(c, u, state) in &cols {
+                unit[c] = 1.0;
+                driver::eval_dae_jacobian(&mut m.engine, sd, &jac, 0.0, &unit, &mut e0)?;
+                if state {
+                    // `F_x'·e = J(1)·e - J(0)·e`
+                    driver::eval_dae_jacobian(&mut m.engine, sd, &jac, 1.0, &unit, &mut e1)?;
+                    for r in 0..n {
+                        m_mat[r * n + u] = e1[r] - e0[r];
+                    }
+                } else {
+                    for r in 0..n {
+                        m_mat[r * n + u] = e0[r];
+                    }
+                }
+                unit[c] = 0.0;
+            }
+            driver::eval_dae_jacobian(&mut m.engine, sd, &jac, 0.0, &rhs_seed, &mut rhs)
+        })?;
+        let mut d: Vec<f64> = rhs[..n].iter().map(|v| -v).collect();
+        if !driver::lu_solve(&mut m_mat, &mut d, n) {
+            return Err(Status::Error);
+        }
+        Ok(unknowns.iter().map(|&u| d[u]).collect())
+    }
+
+    /// fmi-ls-dae FMU: the residual rows (residuals, then initial residuals) at the
+    /// point the slots hold, evaluated afresh.
+    fn dae_residual_rows(&mut self, rows: &[usize]) -> Result<Vec<f64>, Status> {
+        let n_res = self.layout.n_dae_res as usize;
+        let init = rows.iter().any(|&r| r >= n_res);
+        self.evaluate(|m| {
+            let sd = m.sim_data;
+            m.engine.call2(driver::MODEL_FN_DAE, sd, eval_stage::DYNAMIC | eval_stage::ALGEBRAIC)?;
+            if init {
+                m.engine.call1_if_present("evaluateInitialDAEResiduals", sd)?;
+            }
+            Ok(())
+        })?;
+        let first = self.dae_enable_vr + 1;
+        rows.iter()
+            .map(|&r| match self.vrs.resolve(first + r as u32) {
+                Some(e) => Ok(self.read_f64(e.off)),
+                None => Err(Status::Error),
+            })
+            .collect()
+    }
+
+    /// The residual function at the current point, which the Jacobian's column
+    /// equations read the auxiliaries of. `update_if_needed` runs it, except in
+    /// Initialization Mode, where the update is the initialization.
+    fn dae_jacobian_point(&mut self) -> Result<(), Status> {
+        self.update_if_needed()?;
+        if self.mode == Mode::Init {
+            self.evaluate(|m| {
+                let sd = m.sim_data;
+                m.engine.call2(driver::MODEL_FN_DAE, sd, eval_stage::DYNAMIC | eval_stage::ALGEBRAIC)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// fmi-ls-dae FMU: `fmi3GetDirectionalDerivative` from the DAE-mode Jacobian. In
+    /// DAE mode the unknowns are residuals (and initial residuals) and the knowns
+    /// states, derivatives, algebraic variables and inputs; in ODE mode the
+    /// unknowns are derivatives and algebraic variables, the knowns states and
+    /// inputs. `None` when the model has no DAE-mode Jacobian.
+    fn dae_directional_derivative(&mut self, unknowns: &[u32], knowns: &[u32], seed: &[f64]) -> Option<Result<Vec<f64>, Status>> {
+        let jac = self.meta.dae.as_ref()?.jac.clone()?;
+        let mut ks = Vec::with_capacity(knowns.len());
+        for &vr in knowns {
+            match self.dae_known(&jac, vr) {
+                Some(k) => ks.push(k),
+                None => return Some(Err(bad_vr("fmi3GetDirectionalDerivative", vr, "a state, derivative, algebraic variable or input"))),
+            }
+        }
+        if self.dae_mode {
+            let mut rows = Vec::with_capacity(unknowns.len());
+            for &vr in unknowns {
+                match self.dae_row(&jac, vr) {
+                    Some(r) => rows.push(r),
+                    None => return Some(Err(bad_vr("fmi3GetDirectionalDerivative", vr, "a residual"))),
+                }
+            }
+            return Some(self.dae_forward_dae(&rows, &ks, seed));
+        }
+        let mut us = Vec::with_capacity(unknowns.len());
+        for &vr in unknowns {
+            match self.dae_known(&jac, vr) {
+                Some((DaeKnown::Xdot(c) | DaeKnown::Col(c), s)) if s == 1.0 && self.dae_unknown_index(&jac, c).is_some() => {
+                    us.push(self.dae_unknown_index(&jac, c).unwrap_or(0))
+                }
+                _ => return Some(Err(bad_vr("fmi3GetDirectionalDerivative", vr, "a derivative or algebraic variable"))),
+            }
+        }
+        Some(self.dae_forward_ode(&us, &ks, seed))
     }
 
     /// The ODE Jacobian at the point the model currently holds, column-major.
@@ -2302,6 +2549,9 @@ macro_rules! shared_instance_methods {
             return Err(Status::Error);
         }
         let mut st = self.st.borrow_mut();
+        if let Some(res) = st.dae_directional_derivative(&unknowns, &knowns, &seed) {
+            return res;
+        }
         st.update_if_needed()?;
         let n = st.layout.n_states as usize;
         let rows: Vec<usize> = unknowns.iter().filter_map(|vr| st.derivative_index(*vr)).collect();
@@ -2320,13 +2570,27 @@ macro_rules! shared_instance_methods {
             })
             .collect())
     }
+    /// `seedᵀ·d(unknowns)/d(knowns)`, for a `--daeMode` FMU from its DAE-mode
+    /// Jacobian: one directional derivative per known (a column of the matrix).
     $($vis)? fn get_adjoint_derivative(
         &self,
-        _: Vec<u32>,
-        _: Vec<u32>,
-        _: Vec<f64>,
+        unknowns: Vec<u32>,
+        knowns: Vec<u32>,
+        seed: Vec<f64>,
     ) -> Result<Vec<f64>, Status> {
-        Err(Status::Error)
+        if unknowns.len() != seed.len() {
+            return Err(Status::Error);
+        }
+        let mut st = self.st.borrow_mut();
+        let mut out = Vec::with_capacity(knowns.len());
+        for &k in &knowns {
+            match st.dae_directional_derivative(&unknowns, &[k], &[1.0]) {
+                Some(Ok(col)) => out.push(col.iter().zip(&seed).map(|(c, s)| c * s).sum()),
+                Some(Err(status)) => return Err(status),
+                None => return Err(Status::Error),
+            }
+        }
+        Ok(out)
     }
 
     /// A periodic clock's period; an event clock's last interval once it ticked.

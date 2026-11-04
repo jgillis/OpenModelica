@@ -6392,6 +6392,42 @@ pub fn eval_sym_jacobian(
     run
 }
 
+/// fmi-ls-dae FMU: `J(cj)·seed` of a `--daeMode` model's DAE-mode Jacobian
+/// (`DaeJac`, `J(cj) = ∂F/∂(x, z, u) + cj·∂F/∂x'`) at the point `SimData` holds, one
+/// `functionJacA_column` evaluation. `seed` has one entry per column, `out` one
+/// per row. The residual function must have run at the point (the column
+/// equations read its auxiliaries).
+pub fn eval_dae_jacobian(
+    e: &mut dyn SimEngine,
+    sim_data: u32,
+    jac: &crate::DaeJac,
+    cj: f64,
+    seed: &[f64],
+    out: &mut [f64],
+) -> Result<()> {
+    if seed.len() != jac.seed_offs.len() || out.len() != jac.result_offs.len() {
+        return Err("DAE-mode Jacobian seed/result count mismatch");
+    }
+    write_f64(e, sim_data + jac.cj_off, cj)?;
+    for (&off, &s) in jac.seed_offs.iter().zip(seed) {
+        write_f64(e, sim_data + off, s)?;
+    }
+    let run = (|| -> Result<()> {
+        if jac.has_constant {
+            e.call1("functionJacA_constantEqns", sim_data)?;
+        }
+        e.call1("functionJacA_column", sim_data)?;
+        for (o, &off) in out.iter_mut().zip(&jac.result_offs) {
+            *o = read_f64(e, sim_data + off)?;
+        }
+        Ok(())
+    })();
+    for &off in &jac.seed_offs {
+        write_f64(e, sim_data + off, 0.0)?;
+    }
+    run
+}
+
 /// DASSL direct-method Jacobian (`INFO(5)=1`, dense `mtype 1`): fill the iteration
 /// matrix `∂G/∂y + cj·∂G/∂y'` (G = y' − f) by a colored numerical FD, one
 /// `functionODE` per color, mirroring the C runtime's `jacA_numColored`.
@@ -12829,7 +12865,7 @@ const DAE_EXPLICIT_FAILED: &str = "the derivatives of the DAE-mode model could n
 
 /// Gaussian elimination with partial pivoting on the row-major `a`, `b` becoming
 /// the solution. `false` on a singular matrix.
-fn lu_solve(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
+pub fn lu_solve(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
     for k in 0..n {
         let mut p = k;
         let mut best = a[k * n + k].abs();

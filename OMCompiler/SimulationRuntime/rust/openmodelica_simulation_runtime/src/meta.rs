@@ -631,15 +631,58 @@ fn dae_info(data: *mut DATA, layout: &Layout) -> Option<openmodelica_sim_meta::D
         return None;
     }
     let d = unsafe { &*(*data).simulationInfo.as_ref()?.daeModeData };
-    let alg_offs = (0..layout.n_dae_alg as usize)
+    let alg_offs: Vec<u32> = (0..layout.n_dae_alg as usize)
         .map(|i| {
             let ix = unsafe { *d.algIndexes.add(i) } as u32;
             openmodelica_sim_meta::REAL_OFF + ix * 8
         })
         .collect();
     Some(openmodelica_sim_meta::DaeInfo {
+        jac: dae_jac_info(data, layout, d),
         alg_offs,
         sparsity: sparsity_info(d.sparsePattern, layout.n_dae_res),
+    })
+}
+
+/// fmi-ls-dae FMU: `DaeInfo::jac` from `analyticJacobians[INDEX_JAC_A]`, the
+/// DAE-mode Jacobian a `--daeMode` FMU is compiled with: its columns are
+/// `daeModeData->jacobianColumnIndexes` (states, algebraic unknowns and inputs),
+/// its rows the residuals and possibly the initial residuals after them.
+fn dae_jac_info(data: *mut DATA, layout: &Layout, d: &crate::abi::DAEMODE_DATA) -> Option<openmodelica_sim_meta::DaeJac> {
+    if !crate::data::has_dae_jac() || d.jacobianColumnIndexes.is_null() {
+        return None;
+    }
+    let j = crate::data::jac_a(data)?;
+    let cols = d.nJacobianColumns.max(0) as usize;
+    let rows = j.sizeRows;
+    let n_res = layout.n_dae_res as usize;
+    if cols == 0
+        || j.sizeCols != cols
+        || (rows != n_res && rows != n_res + crate::data::n_init_res() as usize)
+        || d.jacobianRowIndexes.is_null()
+        || d.nJacobianRows.max(0) as usize != rows
+    {
+        return None;
+    }
+    // Physical row `p` is residual `jacobianRowIndexes[p]`.
+    let mut result_offs = vec![u32::MAX; rows];
+    for p in 0..rows {
+        let r = unsafe { *d.jacobianRowIndexes.add(p) };
+        if r < 0 || r as usize >= rows || result_offs[r as usize] != u32::MAX {
+            return None;
+        }
+        result_offs[r as usize] = layout.nls_jac_off + (cols + p) as u32 * 8;
+    }
+    let col_offs = (0..cols)
+        .map(|i| openmodelica_sim_meta::REAL_OFF + (unsafe { *d.jacobianColumnIndexes.add(i) } as u32) * 8)
+        .collect();
+    let x = crate::data::extra(layout, unsafe { &*(*data).modelData });
+    Some(openmodelica_sim_meta::DaeJac {
+        col_offs,
+        seed_offs: (0..cols as u32).map(|k| layout.nls_jac_off + k * 8).collect(),
+        result_offs,
+        cj_off: x.dae_cj,
+        has_constant: j.constantEqns.is_some(),
     })
 }
 
@@ -682,6 +725,10 @@ fn sparsity_info(sp: *const SPARSE_PATTERN, n: u32) -> Option<openmodelica_sim_m
 /// has already had the model fill. The seeds and results are C's own arrays, which
 /// `build_regions` maps onto the layout's Jacobian window.
 fn jac_a_info(data: *mut DATA, layout: &Layout) -> Option<openmodelica_sim_meta::JacAInfo> {
+    // A `--daeMode` model's JAC_A is the residual Jacobian (`DaeInfo::jac`), not ∂f/∂x.
+    if crate::data::has_dae_jac() {
+        return None;
+    }
     let j = crate::data::jac_a(data)?;
     let n = layout.n_states;
     let mut info = sparsity_info(j.sparsePattern, n)?;

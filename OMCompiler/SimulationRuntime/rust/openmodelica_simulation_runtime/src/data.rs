@@ -65,6 +65,9 @@ pub struct Extra {
     /// `daeModeData->initialResidualVars`: the initial equations as residuals, an
     /// OpenModelica extension of fmi-ls-dae served as `_D_INITres<i>`.
     pub init_res: u32,
+    /// fmi-ls-dae FMU: the DAE-mode Jacobian's `dae_cj` (JAC_A of a `--daeMode`
+    /// model), which `fmi3GetDirectionalDerivative` sets per evaluation.
+    pub dae_cj: u32,
     /// One past the last of them.
     pub end: u32,
 }
@@ -90,6 +93,7 @@ pub fn extra(layout: &Layout, md: &MODEL_DATA) -> Extra {
         opt_jac: opt.map(|w| take(w * 8)),
         jac_adj: take(JAC_ADJ_WORDS.load(core::sync::atomic::Ordering::Relaxed) * 8),
         init_res: take(INIT_RES_WORDS.load(core::sync::atomic::Ordering::Relaxed) * 8),
+        dae_cj: take(DAE_CJ_WORDS.load(core::sync::atomic::Ordering::Relaxed) * 8),
         end: 0,
     };
     Extra { end: at, ..e }
@@ -1070,6 +1074,15 @@ fn jac_ptr(data: *mut DATA, index: c_int) -> *mut JACOBIAN {
 
 static JAC_ADJ_WORDS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// 1 when JAC_A is a `--daeMode` model's symbolic DAE-mode Jacobian, whose `dae_cj`
+/// [`Extra::dae_cj`] maps; 0 otherwise.
+static DAE_CJ_WORDS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Whether JAC_A is a `--daeMode` model's DAE-mode Jacobian (see [`Extra::dae_cj`]).
+pub fn has_dae_jac() -> bool {
+    DAE_CJ_WORDS.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
 /// `daeModeData->nInitialResidualVars` of a model run in DAE mode, 0 otherwise. Set
 /// with the layout; [`extra`] reserves the window from it.
 static INIT_RES_WORDS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -1093,6 +1106,11 @@ fn init_jac_a(data: *mut DATA, thread_data: *mut threadData_t) {
     if !ok {
         unsafe { (*j).availability = JACOBIAN_NOT_AVAILABLE };
     }
+    let dae_jac = ok
+        && unsafe { crate::support::compiledInDAEMode } != 0
+        && unsafe { (*j).availability } == JACOBIAN_AVAILABLE
+        && unsafe { !(*j).seedVars.is_null() && !(*j).resultVars.is_null() && (*j).evalColumn.is_some() };
+    DAE_CJ_WORDS.store(dae_jac as u32, core::sync::atomic::Ordering::Relaxed);
     // C's `initSymbolicOdeJacobian`: a model compiled bidirectionally initialized its
     // adjoint along with A; one compiled with the adjoint alone only on request.
     let cb = unsafe { &*(*data).callback };
@@ -1323,6 +1341,9 @@ pub fn build_regions(rt: &mut RtData) {
             (j.sizeRows * 8) as u32,
             j.resultVars.cast(),
         );
+    }
+    if has_dae_jac() {
+        direct(x.dae_cj, 8, unsafe { &mut (*jac_a_ptr(rt.data)).dae_cj } as *mut f64 as *mut c_void);
     }
     if let Some(a) = unsafe { jac_adj_ptr(rt.data).as_ref() } {
         let (cols, rows) = ((a.sizeCols * 8) as u32, (a.sizeRows * 8) as u32);

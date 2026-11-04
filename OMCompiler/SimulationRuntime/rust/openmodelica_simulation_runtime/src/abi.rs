@@ -491,6 +491,14 @@ pub struct DAEMODE_DATA {
     pub nInitialResidualVars: c_long,
     pub initialResidualVars: *mut modelica_real,
     pub evaluateInitialDAEResiduals: Option<unsafe extern "C" fn(*mut DATA, *mut threadData_t) -> c_int>,
+    /// fmi-ls-dae FMU: the variable of each column of the DAE-mode Jacobian
+    /// (`INDEX_JAC_A`) as a `realVars` index: the states, the algebraic variables
+    /// and the inputs.
+    pub nJacobianColumns: c_long,
+    pub jacobianColumnIndexes: *mut c_int,
+    /// Each row's residual: `i`, or `nResidualVars + k` for initial residual `k`.
+    pub nJacobianRows: c_long,
+    pub jacobianRowIndexes: *mut c_int,
 }
 
 #[repr(C)]
