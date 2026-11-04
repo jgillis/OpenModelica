@@ -1,4 +1,5 @@
-model DaeModeMeC "Index-1 DAE: an algebraic loop, a nonlinear algebraic variable, a state event"
+model DaeModeMeC "Index-1 DAE: an algebraic loop, a nonlinear algebraic variable, a state event, an input"
+  input Real u(start = 0);
   Real x(start = 1, fixed = true);
   Real y "in a linear loop with z";
   Real z(nominal = 0.1);
@@ -6,7 +7,7 @@ model DaeModeMeC "Index-1 DAE: an algebraic loop, a nonlinear algebraic variable
   discrete Real bump(start = 0, fixed = true);
 equation
   der(x) = y - bump;
-  y + 2*z = x;
+  y + 2*z = x + u;
   y - 3*z = 2*x;
   w = x*z + z^2;
   when x > 1.5 then

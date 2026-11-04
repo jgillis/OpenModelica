@@ -103,6 +103,8 @@ ignores:
   continuous inputs the residual depends on structurally, including through the
   auxiliary variables of the DAE formulation; parameters and discrete variables
   are not listed. A residual without the attributes may depend on every known.
+- They are rows of the DAE-mode Jacobian too, so ``fmi3GetDirectionalDerivative``
+  and ``fmi3GetAdjointDerivative`` answer for them (see below).
 
 FMI-LS-DAE: Initialization Mode in DAE mode
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -132,6 +134,36 @@ placeholders for the importer (``x^(7/3)`` of a negative start value, say),
 which would make the FMU unusable in DAE mode. An importer that wants
 OpenModelica's initialization can run an instance in ODE mode and read the
 initial point from it.
+
+FMI-LS-DAE: directional and adjoint derivatives
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The FMU is compiled with the symbolic DAE-mode Jacobian of its residuals,
+whatever ``--generateDynamicJacobian`` says, and declares
+``providesDirectionalDerivatives="true"`` and
+``providesAdjointDerivatives="true"``. The Jacobian is
+``J(cj) = dF/d(x, z, u) + cj dF/dx'``: DAE-mode differentiation turns
+``der(x)`` into ``cj`` times the seed of ``x`` (as for IDA), with the continuous
+inputs as columns besides the states and the algebraic variables and the
+initial residuals as rows after the residuals. The ``dependencies`` of each
+fmi-ls-dae ``Residual`` are read off its pattern, so they list the inputs too.
+
+- In DAE mode, ``fmi3GetDirectionalDerivative`` answers for the residuals
+  ``_D_DAEres<i>`` and the initial residuals ``_D_INITres<i>`` as unknowns,
+  with states, state derivatives, algebraic variables and continuous inputs as
+  knowns, from one evaluation of the Jacobian's column function at ``cj = 0``,
+  plus one at ``cj = 1`` when a state derivative is seeded:
+  ``J(0)(a - b, s_z, s_u) + J(1)(b, 0, 0)`` for the seeds ``a`` of the states
+  and ``b`` of their derivatives. Time and parameters as knowns are
+  differenced (central differences, two residual evaluations).
+- In ODE mode it answers for the derivatives and the algebraic variables as
+  unknowns, with states and inputs as knowns, by the implicit function theorem
+  on the residuals at the point the FMU solved for:
+  ``[dF/dx' dF/dz] (dx', dz) = -(dF/dx dx + dF/du du)``.
+- ``fmi3GetAdjointDerivative`` returns ``seed^T J`` column by column, one
+  directional derivative per known.
+- If the symbolic Jacobian cannot be generated (a function without derivative,
+  for example) the export warns and the FMU declares neither capability.
 
 Supported Capability Flags
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -171,7 +203,7 @@ and, for FMI 3.0, Scheduled Execution).
    * - Adjoint derivatives
      - —
      - —
-     - wip
+     - dae
      - wip
      - wip
    * - Per-element dependencies
@@ -219,6 +251,9 @@ Legend:
   :ref:`-d=disableDirectionalDerivatives<omcflag-debug-disableDirectionalDerivatives>`.
 - ``exp`` — only enabled with the experimental flag ``-d=fmuExperimental``
   (``false`` by default). In FMI 3.0 these state features are always enabled.
+- ``dae`` — exported as ``true`` for a ``--daeMode`` FMU (fmi-ls-dae,
+  ``--simCodeTarget=C+Rust``) with its symbolic DAE-mode Jacobian, which also
+  sets directional derivatives to ``true``; ``false`` otherwise.
 - ``wip`` — in active development; currently exported as ``false``.
 - ``—`` — not applicable to this interface type or FMI version.
 

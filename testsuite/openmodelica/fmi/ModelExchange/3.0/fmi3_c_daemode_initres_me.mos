@@ -23,6 +23,11 @@ system("grep -E \"name=\\\"(x[1-4]|der\\(x[1-4]\\)|y|z|w|_D_daeMode|_D_DAEres[0-
 
 system("unzip -cqq DaeModeInitResC.fmu sources/DaeModeInitResC_16dae.c | sed -n \"/^int DaeModeInitResC_evaluateInitialDAEResiduals/,/^}/p\" | grep \"res\\[\" | sed \"s/^ *//\""); getErrorString();
 
+// The DAE-mode Jacobian the FMU answers fmi3GetDirectionalDerivative from has
+// the initial residuals as rows after the residuals: the variable (realVars
+// index) of each column and the residual of each row.
+system("unzip -cqq DaeModeInitResC.fmu sources/DaeModeInitResC_16dae.c | grep \"const int jacobian\" | sed \"s/^ *//\""); getErrorString();
+
 // Result:
 // true
 // ""
@@ -108,6 +113,10 @@ system("unzip -cqq DaeModeInitResC.fmu sources/DaeModeInitResC_16dae.c | sed -n 
 // res[0] = (data->localData[0]->realVars[0] /* x1 STATE(1) */) + ((-2.0) * ((data->localData[0]->realVars[1] /* x2 STATE(1) */))); /* x1 + (-2.0) * x2 */
 // res[1] = (data->localData[0]->realVars[4] /* der(x1) STATE_DER */); /* $DER.x1 */
 // res[2] = (data->localData[0]->realVars[8] /* w variable */) - (data->localData[0]->realVars[3] /* x4 STATE(1) */); /* w - x4 */
+// 0
+// ""
+// const int jacobianColumnIndexes[6] = {0,1,2,3,9,10};
+// const int jacobianRowIndexes[9] = {0,1,2,3,4,5,6,7,8};
 // 0
 // ""
 // endResult
