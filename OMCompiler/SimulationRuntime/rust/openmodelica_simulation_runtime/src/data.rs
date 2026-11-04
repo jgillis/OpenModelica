@@ -62,6 +62,9 @@ pub struct Extra {
     pub opt_jac: [u32; 3],
     /// JAC_A's adjoint: seeds, results, then temporaries.
     pub jac_adj: u32,
+    /// `daeModeData->initialResidualVars`: the initial equations as residuals, an
+    /// OpenModelica extension of fmi-ls-dae served as `_D_INITres<i>`.
+    pub init_res: u32,
     /// One past the last of them.
     pub end: u32,
 }
@@ -86,6 +89,7 @@ pub fn extra(layout: &Layout, md: &MODEL_DATA) -> Extra {
         recon_jac_h: take(jac_h * 8),
         opt_jac: opt.map(|w| take(w * 8)),
         jac_adj: take(JAC_ADJ_WORDS.load(core::sync::atomic::Ordering::Relaxed) * 8),
+        init_res: take(INIT_RES_WORDS.load(core::sync::atomic::Ordering::Relaxed) * 8),
         end: 0,
     };
     Extra { end: at, ..e }
@@ -1066,6 +1070,15 @@ fn jac_ptr(data: *mut DATA, index: c_int) -> *mut JACOBIAN {
 
 static JAC_ADJ_WORDS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// `daeModeData->nInitialResidualVars` of a model run in DAE mode, 0 otherwise. Set
+/// with the layout; [`extra`] reserves the window from it.
+static INIT_RES_WORDS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The number of initial residuals the flat address space serves (see [`Extra::init_res`]).
+pub fn n_init_res() -> u32 {
+    INIT_RES_WORDS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// C's solvers each run `initialAnalyticJacobianA` at setup; the layout needs the
 /// shape before the driver starts, so it runs once here instead.
 fn init_jac_a(data: *mut DATA, thread_data: *mut threadData_t) {
@@ -1128,14 +1141,20 @@ fn layout_for(
     let n_states = md.nStates as u32;
     let n_real_alg = (md.nVariablesReal - 2 * md.nStates).max(0) as u32;
     let dae = unsafe { md.nStateSets >= 0 && !_si.daeModeData.is_null() }.then(|| unsafe { &*_si.daeModeData });
-    let (n_dae_res, n_dae_aux, n_dae_alg) = match dae {
+    let (n_dae_res, n_dae_aux, n_dae_alg, n_init_res) = match dae {
         Some(d) if unsafe { crate::support::compiledInDAEMode } != 0 => (
             d.nResidualVars as u32,
             d.nAuxiliaryVars as u32,
             d.nAlgebraicDAEVars as u32,
+            match d.initialResidualVars.is_null() || d.evaluateInitialDAEResiduals.is_none() {
+                true => 0,
+                false => d.nInitialResidualVars.max(0) as u32,
+            },
         ),
-        _ => (0, 0, 0),
+        _ => (0, 0, 0, 0),
     };
+    // Only beside a DAE formulation: the value references follow its residuals.
+    INIT_RES_WORDS.store(if n_dae_res > 0 { n_init_res } else { 0 }, core::sync::atomic::Ordering::Relaxed);
     Layout::new(
         n_states,
         n_real_alg,
@@ -1323,6 +1342,11 @@ pub fn build_regions(rt: &mut RtData) {
             l.dae_aux_off,
             l.n_dae_aux * 8,
             unsafe { (*si.daeModeData).auxiliaryVars } as *mut c_void,
+        );
+        direct(
+            x.init_res,
+            n_init_res() * 8,
+            unsafe { (*si.daeModeData).initialResidualVars } as *mut c_void,
         );
     }
 

@@ -487,6 +487,10 @@ pub struct DAEMODE_DATA {
     pub sparsePattern: *mut SPARSE_PATTERN,
     pub evaluateDAEResiduals: Option<unsafe extern "C" fn(*mut DATA, *mut threadData_t, c_int) -> c_int>,
     pub algIndexes: *mut c_int,
+    /// OpenModelica extension of fmi-ls-dae: the initial equations as residuals.
+    pub nInitialResidualVars: c_long,
+    pub initialResidualVars: *mut modelica_real,
+    pub evaluateInitialDAEResiduals: Option<unsafe extern "C" fn(*mut DATA, *mut threadData_t) -> c_int>,
 }
 
 #[repr(C)]

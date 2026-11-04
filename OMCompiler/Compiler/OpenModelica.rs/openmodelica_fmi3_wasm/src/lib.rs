@@ -1915,6 +1915,22 @@ macro_rules! shared_instance_methods {
         let mut st = self.st.borrow_mut();
         st.update_if_needed()?;
         let vrs = st.vrs.expand(&vrs);
+        // OpenModelica extension of fmi-ls-dae: `_D_INITres<i>`, the initial
+        // equations as residuals, follow the residuals. Evaluated on demand at the
+        // current point, which `update_if_needed` brought up to date (in
+        // Initialization Mode by the initial solve, which leaves the DAE's own
+        // auxiliaries to the residual function).
+        let init_res_vr = st.dae_enable_vr + 1 + st.layout.n_dae_res;
+        if st.dae_enable_vr != 0 && vrs.iter().any(|&vr| vr >= init_res_vr) {
+            let init = st.mode == Mode::Init;
+            st.evaluate(|m| {
+                let sd = m.sim_data;
+                if init {
+                    m.engine.call2(driver::MODEL_FN_DAE, sd, eval_stage::DYNAMIC | eval_stage::ALGEBRAIC)?;
+                }
+                m.engine.call1_if_present("evaluateInitialDAEResiduals", sd)
+            })?;
+        }
         let mut out = Vec::with_capacity(vrs.len());
         for vr in vrs {
             match st.vrs.resolve(vr) {

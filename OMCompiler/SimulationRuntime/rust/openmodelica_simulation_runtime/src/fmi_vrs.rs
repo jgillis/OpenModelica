@@ -252,6 +252,13 @@ pub(crate) fn build(data: *mut DATA, layout: &Layout) -> (Vec<FmiVr>, u32) {
         for i in 0..layout.n_dae_res {
             out.push(scalar(dae_enable_vr + 1 + i, layout.dae_res_off + i * 8));
         }
+        // OpenModelica extension of fmi-ls-dae: `_D_INITres<i>`, the initial
+        // equations as residuals, after the residuals (`fmi3_get_float64`
+        // evaluates them on demand).
+        let init_res = crate::data::extra(layout, md).init_res;
+        for i in 0..crate::data::n_init_res() {
+            out.push(scalar(dae_enable_vr + 1 + layout.n_dae_res + i, init_res + i * 8));
+        }
     }
     out.sort_by_key(|e| e.vr);
     out.dedup_by_key(|e| e.vr);

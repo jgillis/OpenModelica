@@ -373,6 +373,14 @@ impl SimEngine for CEngine {
                 self.call_cb(cb.functionDAE)
             }
             "functionLocalKnownVars" => self.call_cb(cb.functionLocalKnownVars),
+            // OpenModelica extension of fmi-ls-dae: the initial equations as
+            // residuals, at the point `evaluateDAEResiduals` last evaluated.
+            "evaluateInitialDAEResiduals" => {
+                let f = unsafe { self.rt.info().daeModeData.as_ref() }
+                    .and_then(|d| d.evaluateInitialDAEResiduals)
+                    .ok_or("the C model has no such entry point")?;
+                self.call_cb(Some(f))
+            }
             "functionInitialEquations" => self.call_cb(cb.functionInitialEquations),
             "functionInitialEquations_lambda0" => {
                 self.call_cb(cb.functionInitialEquations_lambda0)
