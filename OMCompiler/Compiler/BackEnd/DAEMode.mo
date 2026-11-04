@@ -49,7 +49,9 @@ import BackendDAE;
 
 protected
 
+import Absyn;
 import Array;
+import AvlTreePathFunction;
 import BackendDAEOptimize;
 import BackendDAEUtil;
 import BackendDAEFunc;
@@ -65,6 +67,7 @@ import ErrorExt;
 import ExecStat.execStat;
 import Expression;
 import ExpressionDump;
+import ExpressionSimplify;
 import ExpressionSolve;
 import Flags;
 import FlagsUtil;
@@ -86,6 +89,7 @@ public function getEqSystemDAEmode "Run the equation system pipeline."
   output BackendDAE.BackendDAE outInitDAE;
   output Option<BackendDAE.BackendDAE> outInitDAE_lambda0_option;
   output list<BackendDAE.Equation> outRemovedInitialEquationLst;
+  output list<BackendDAE.Equation> outInitialResiduals "the initial-equation section in scalar residual form (createInitialResiduals)";
  protected
   BackendDAE.BackendDAE dae, simDAE;
   list<tuple<BackendDAEFunc.optimizationModule, String>> preOptModules;
@@ -142,6 +146,8 @@ algorithm
     // Set updated globalKnownVars
     simDAE := BackendDAEUtil.setDAEGlobalKnownVars(simDAE, globalKnownVars);
     simDAE := BackendDAEOptimize.addInitialStmtsToAlgorithms(simDAE, false);
+    // the initial-equation section, before removeInitializationStuff drops it
+    outInitialResiduals := createInitialResiduals(simDAE.shared);
     simDAE := Initialization.removeInitializationStuff(simDAE);
 
     // post-optimization phase
@@ -167,6 +173,98 @@ algorithm
   end try annotation(__OpenModelica_stackOverflowCheckpoint=true);
   fail();
 end getEqSystemDAEmode;
+
+public function createInitialResiduals
+"OpenModelica extension of fmi-ls-dae: the model's initial-equation section in
+ scalar residual form lhs - rhs, as an importer imposes it at the initial time
+ with the states, their derivatives and the algebraic variables free.
+
+ shared.initialEqs at this point is the section itself, alias-eliminated and
+ index-reduced; it contains no start-value equation of a fixed=true variable,
+ those are added by the initialization only. initial() is true, sample() false,
+ delay(e, ...) is e and homotopy(actual, simplified) is actual. Equations without
+ a scalar residual form (initial algorithms, when, if) are not exported."
+  input BackendDAE.Shared shared;
+  output list<BackendDAE.Equation> residuals = {};
+protected
+  BackendDAE.Equation eq;
+  list<BackendDAE.Equation> res;
+algorithm
+  for e in BackendEquation.equationList(shared.initialEqs) loop
+    if BackendEquation.equationSize(e) > 0 then
+      (eq, _) := BackendEquation.traverseExpsOfEquation(e, Expression.traverseSubexpressionsHelper, (simplifyInitialResidualExp, 0));
+      try
+        res := initialEquationResiduals(eq, shared.functionTree);
+        true := List.all(res, isScalarResidual);
+        residuals := List.append_reverse(res, residuals);
+      else
+        Error.addSourceMessage(Error.COMPILER_WARNING,
+          {"The initial equation " + BackendDump.equationString(e) + " has no scalar residual form, so it is not exported among the FMU's initial residuals."},
+          BackendEquation.equationInfo(e));
+      end try;
+    end if;
+  end for;
+  residuals := listReverse(residuals);
+end createInitialResiduals;
+
+protected function initialEquationResiduals
+  "lhs - rhs, as written: equationToScalarResidualForm's createResidualExp
+   multiplies fractions out (a = b/c to a*c - b) and may swap the sides, which
+   changes the residual's scaling and sign. Everything else goes through
+   equationToScalarResidualForm."
+  input BackendDAE.Equation eq;
+  input AvlTreePathFunction.Tree funcTree;
+  output list<BackendDAE.Equation> res;
+protected
+  DAE.Exp e;
+  list<DAE.Exp> explst;
+  list<list<DAE.Subscript>> subslst;
+algorithm
+  res := match eq
+    case BackendDAE.EQUATION(exp = DAE.TUPLE()) then BackendEquation.equationToScalarResidualForm(eq, funcTree);
+    case BackendDAE.EQUATION()
+      guard not Expression.isArrayType(Expression.typeof(eq.exp))
+      algorithm
+        (e, _) := ExpressionSimplify.simplify(Expression.expSub(eq.exp, eq.scalar));
+      then {BackendDAE.RESIDUAL_EQUATION(e, eq.source, eq.attr)};
+    case BackendDAE.ARRAY_EQUATION()
+      algorithm
+        e := Expression.expSub(eq.left, eq.right);
+        subslst := Expression.dimensionSizesSubscripts(eq.dimSize);
+        subslst := Expression.rangesToSubscripts(subslst);
+        explst := List.map1r(subslst, Expression.applyExpSubscripts, e);
+        explst := ExpressionSimplify.simplifyList(explst);
+      then list(BackendDAE.RESIDUAL_EQUATION(x, eq.source, eq.attr) for x in explst);
+    else BackendEquation.equationToScalarResidualForm(eq, funcTree);
+  end match;
+end initialEquationResiduals;
+
+protected function isScalarResidual
+  input BackendDAE.Equation eq;
+  output Boolean b;
+algorithm
+  b := match eq
+    case BackendDAE.RESIDUAL_EQUATION() then not Expression.isArrayType(Expression.typeof(eq.exp));
+    else false;
+  end match;
+end isScalarResidual;
+
+protected function simplifyInitialResidualExp
+  input DAE.Exp inExp;
+  input Integer dummy;
+  output DAE.Exp outExp;
+  output Integer outDummy = dummy;
+algorithm
+  outExp := match inExp
+    local
+      DAE.Exp e;
+    case DAE.CALL(path=Absyn.IDENT(name="initial")) then DAE.BCONST(true);
+    case DAE.CALL(path=Absyn.IDENT(name="sample")) then DAE.BCONST(false);
+    case DAE.CALL(path=Absyn.IDENT(name="delay"), expLst=_::e::_) then e;
+    case DAE.CALL(path=Absyn.IDENT(name="homotopy"), expLst=e::_) then e;
+    else inExp;
+  end match;
+end simplifyInitialResidualExp;
 
 /*
 get config function

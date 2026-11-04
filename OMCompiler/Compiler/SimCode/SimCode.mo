@@ -398,6 +398,7 @@ uniontype DaeModeData
     list<SimCodeVar.SimVar> algebraicVars;
     list<SimCodeVar.SimVar> auxiliaryVars;
     DaeModeConfig modeCreated; // indicates the mode in which
+    list<SimEqSystem> initialResidualEquations "OpenModelica extension of fmi-ls-dae: the initial-equation section as SES_RESIDUALs (res_index 0..n-1), evaluated after the DAE residuals at the same point";
   end DAEMODEDATA;
 end DaeModeData;
 

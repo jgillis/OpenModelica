@@ -1067,7 +1067,8 @@ public
         residualVars    = SimVar.SimVar.convertList(data.residualVars),
         algebraicVars   = SimVar.SimVar.convertList(data.algebraicVars),
         auxiliaryVars   = SimVar.SimVar.convertList(data.auxiliaryVars),
-        modeCreated     = convertMode(data.modeCreated));
+        modeCreated     = convertMode(data.modeCreated),
+        initialResidualEquations = {});
     end convert;
 
   protected

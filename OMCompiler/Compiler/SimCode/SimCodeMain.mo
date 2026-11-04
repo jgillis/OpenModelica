@@ -89,6 +89,7 @@ import Debug;
 import Error;
 import ErrorExt;
 import ExecStat;
+import Expression;
 import FGraph;
 import Flags;
 import FlagsUtil;
@@ -965,6 +966,19 @@ algorithm
   end match;
 end wasmFMUSimulationFlagsJson;
 
+protected function withoutInitialResiduals
+  input SimCode.SimCode inSimCode;
+  output SimCode.SimCode simCode = inSimCode;
+protected
+  SimCode.DaeModeData dmd;
+algorithm
+  if isSome(simCode.daeModeData) then
+    SOME(dmd) := simCode.daeModeData;
+    dmd.initialResidualEquations := {};
+    simCode.daeModeData := SOME(dmd);
+  end if;
+end withoutInitialResiduals;
+
 public function emitWasmFMU
   "Render the FMI metadata and write the self-contained <name>.fmu: link the model
    kernel with the adapter into an fmi-ls-wasm component (host-free, all in Rust —
@@ -972,11 +986,14 @@ public function emitWasmFMU
    when translateModelFMU already did that translation, against the SimCode it
    kept — so the export is a link and an XML render rather than a second
    translation."
-  input SimCode.SimCode simCode;
+  input SimCode.SimCode inSimCode;
   input String FMUVersion;
   input String FMUType;
   input Absyn.Program program;
 protected
+  // the initial residuals (an OpenModelica extension of fmi-ls-dae) are served
+  // by the C+Rust runtime only, so the wasm component does not declare them
+  SimCode.SimCode simCode = withoutInitialResiduals(inSimCode);
   String guid, modelDescriptionStr, simulationFlagsJson;
   String lsDaeManifestStr = "";
   String fmutmp = "", terminalsDir = "", documentationDir = "";
@@ -2069,7 +2086,7 @@ algorithm
       FCore.Graph graph;
       BackendDAE.BackendDAE dlow, initDAE;
       Option<BackendDAE.BackendDAE> initDAE_lambda0_option;
-      list<BackendDAE.Equation> removedInitialEquationLst;
+      list<BackendDAE.Equation> removedInitialEquationLst, initialResiduals;
       Option<list<String>> strPreOptModules;
       Boolean isFMI;
 
@@ -2111,7 +2128,7 @@ algorithm
       strPreOptModules := if isFMI then SOME("introduceOutputAliases"::BackendDAEUtil.getPreOptModulesString()) else NONE();
 
       //BackendDump.printBackendDAE(dlow);
-      (dlow, initDAE, initDAE_lambda0_option, removedInitialEquationLst) := DAEMode.getEqSystemDAEmode(dlow, inFileNamePrefix, strPreOptModules=strPreOptModules);
+      (dlow, initDAE, initDAE_lambda0_option, removedInitialEquationLst, initialResiduals) := DAEMode.getEqSystemDAEmode(dlow, inFileNamePrefix, strPreOptModules=strPreOptModules);
       ExecStat.execStat("Backend");
 
       timeBackend := System.realtimeTock(ClockIndexes.RT_CLOCK_BACKEND);
@@ -2123,7 +2140,7 @@ algorithm
         ExecStat.execStat("Serialize solved system");
       end if;
 
-      (libs, file_dir, timeSimCode, timeTemplates) := generateModelCodeDAE(dlow, initDAE, initDAE_lambda0_option, removedInitialEquationLst, SymbolTable.getAbsyn(), className, inFileNamePrefix, inSimSettingsOpt, args, kind);
+      (libs, file_dir, timeSimCode, timeTemplates) := generateModelCodeDAE(dlow, initDAE, initDAE_lambda0_option, removedInitialEquationLst, initialResiduals, SymbolTable.getAbsyn(), className, inFileNamePrefix, inSimSettingsOpt, args, kind);
       timeSimCode := System.realtimeTock(ClockIndexes.RT_CLOCK_SIMCODE);
       timeTemplates := System.realtimeTock(ClockIndexes.RT_CLOCK_TEMPLATES);
 
@@ -2191,6 +2208,7 @@ protected function generateModelCodeDAE
   input BackendDAE.BackendDAE inInitDAE;
   input Option<BackendDAE.BackendDAE> initDAE_lambda0_option;
   input list<BackendDAE.Equation> inRemovedInitialEquationLst;
+  input list<BackendDAE.Equation> inInitialResiduals "DAEMode.createInitialResiduals";
   input Absyn.Program p;
   input Absyn.Path className;
   input String filenamePrefix;
@@ -2243,6 +2261,11 @@ protected
   list<String> matrixnames;
   list<list<SimCode.SimEqSystem>> daeEquations;
   list<SimCodeVar.SimVar> residualVars, algebraicStateVars, auxiliaryVars;
+  list<SimCode.SimEqSystem> initialResidualEquations;
+  Integer resIndex;
+  DAE.Exp resExp;
+  DAE.ElementSource resSource;
+  BackendDAE.EquationAttributes resAttr;
 
   tuple<Option<BackendDAE.SymbolicJacobian>, BackendDAE.SparsePattern, BackendDAE.SparseColoring, BackendDAE.NonlinearPattern> daeModeJacobian;
   Option<BackendDAE.SymbolicJacobian> daeModeJac;
@@ -2475,7 +2498,19 @@ algorithm
     end if;
 
     daeModeConf := SimCode.ALL_EQUATIONS();
-    daeModeData := SOME(SimCode.DAEMODEDATA(daeEquations, daeModeSP, residualVars, algebraicStateVars, auxiliaryVars, daeModeConf));
+    // OpenModelica extension of fmi-ls-dae: the initial equations as residuals
+    initialResidualEquations := {};
+    resIndex := 0;
+    for eq in inInitialResiduals loop
+      BackendDAE.RESIDUAL_EQUATION(exp = resExp, source = resSource, attr = resAttr) := eq;
+      resExp := Expression.replaceDerOpInExp(resExp);
+      initialResidualEquations := SimCode.SES_RESIDUAL(uniqueEqIndex, resIndex, resExp, resSource, resAttr) :: initialResidualEquations;
+      uniqueEqIndex := uniqueEqIndex + 1;
+      resIndex := resIndex + 1;
+    end for;
+    initialResidualEquations := listReverse(initialResidualEquations);
+
+    daeModeData := SOME(SimCode.DAEMODEDATA(daeEquations, daeModeSP, residualVars, algebraicStateVars, auxiliaryVars, daeModeConf, initialResidualEquations));
 
     /* This is a *much* better estimate than the guessed number of equations */
     modelInfo := SimCodeUtil.addNumEqns(modelInfo, uniqueEqIndex - listLength(jacobianEquations));
