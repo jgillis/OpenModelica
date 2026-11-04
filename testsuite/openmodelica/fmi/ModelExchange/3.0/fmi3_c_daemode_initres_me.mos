@@ -1,0 +1,113 @@
+// name: fmi3_c_daemode_initres_me.mos
+// keywords: FMI 3.0 export Model Exchange daeMode fmi-ls-dae initial equations
+// status: correct
+// teardown_command: rm -rf DaeModeInitResC*
+//
+// The initial equations of a `--daeMode` model as residuals, an OpenModelica
+// extension of fmi-ls-dae for an importer that imposes them itself at the initial
+// time (states, their derivatives and the algebraic variables free): Float64
+// variables _D_INITres<i> after the residuals, listed with their structural
+// dependencies in an org.openmodelica annotation of the manifest. The start value
+// of the fixed=true x3 is not among them; w = x4 reads the auxiliary w, so its
+// dependencies are what w's equation reads (x1, z, x3) and x4.
+
+setCommandLineOptions("--fmiSources=true --simCodeTarget=C+Rust"); getErrorString();
+loadFile("fmi3_c_daemode_initres_me.mo"); getErrorString();
+buildModelFMU(DaeModeInitResC, version="3.0", fmuType="me"); getErrorString();
+
+system("unzip -cqq DaeModeInitResC.fmu extra/org.fmi-standard.fmi-ls-dae/fmi-ls-manifest.xml > DaeModeInitResC_lsdae.xml"); getErrorString();
+readFile("DaeModeInitResC_lsdae.xml"); getErrorString();
+
+system("unzip -cqq DaeModeInitResC.fmu modelDescription.xml > DaeModeInitResC_md.xml"); getErrorString();
+system("grep -E \"name=\\\"(x[1-4]|der\\(x[1-4]\\)|y|z|w|_D_daeMode|_D_DAEres[0-9]*|_D_INITres[0-9]*)\\\"\" DaeModeInitResC_md.xml | sed \"s/^ *//\""); getErrorString();
+
+system("unzip -cqq DaeModeInitResC.fmu sources/DaeModeInitResC_16dae.c | sed -n \"/^int DaeModeInitResC_evaluateInitialDAEResiduals/,/^}/p\" | grep \"res\\[\" | sed \"s/^ *//\""); getErrorString();
+
+// Result:
+// true
+// ""
+// true
+// ""
+// "DaeModeInitResC.fmu"
+// "Notification: The Model Exchange FMU carries a DAE formulation as fmi-ls-dae 1.0.0-alpha.1, implemented against the draft of 2026-09-11 (commit e5b8ffa). fmi-ls-dae is not a released layered standard yet, so an importer written against another revision of the draft may not read the manifest.
+// Notification: Building FMU for platform 'static' (1/1).
+// Notification: Finished FMU for platform 'static' (1/1).
+// "
+// 0
+// ""
+// "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+// <fmiDAEManifest
+//   xmlns:fmi-ls=\"http://fmi-standard.org/fmi-ls-manifest\"
+//   fmi-ls:fmi-ls-name=\"org.fmi-standard.fmi-ls-dae\"
+//   fmi-ls:fmi-ls-version=\"1.0.0-alpha.1\"
+//   fmi-ls:fmi-ls-description=\"Layered standard for DAE support in FMI.\">
+//   <EnableDAEParameter valueReference=\"13\"/>
+//   <AlgebraicVariables>
+//     <AlgebraicVariable valueReference=\"4\"/>
+//     <AlgebraicVariable valueReference=\"5\"/>
+//     <AlgebraicVariable valueReference=\"6\"/>
+//     <AlgebraicVariable valueReference=\"7\"/>
+//     <AlgebraicVariable valueReference=\"9\"/>
+//     <AlgebraicVariable valueReference=\"10\"/>
+//   </AlgebraicVariables>
+//   <ModelStructure>
+//     <ContinuousStateDerivative valueReference=\"4\" dependencies=\"4\" dependenciesKind=\"constant\"/>
+//     <ContinuousStateDerivative valueReference=\"5\" dependencies=\"5\" dependenciesKind=\"constant\"/>
+//     <ContinuousStateDerivative valueReference=\"6\" dependencies=\"6\" dependenciesKind=\"constant\"/>
+//     <ContinuousStateDerivative valueReference=\"7\" dependencies=\"7\" dependenciesKind=\"constant\"/>
+//     <InitialUnknown valueReference=\"0\"/>
+//     <InitialUnknown valueReference=\"1\"/>
+//     <InitialUnknown valueReference=\"3\"/>
+//     <InitialUnknown valueReference=\"4\"/>
+//     <InitialUnknown valueReference=\"5\"/>
+//     <InitialUnknown valueReference=\"6\"/>
+//     <InitialUnknown valueReference=\"7\"/>
+//     <Residual valueReference=\"14\" dependencies=\"1 5 9 10\" dependenciesKind=\"dependent dependent dependent dependent\"/>
+//     <Residual valueReference=\"15\" dependencies=\"0 4 9 10\" dependenciesKind=\"dependent dependent dependent dependent\"/>
+//     <Residual valueReference=\"16\" dependencies=\"0 4 2 6 3 7 10\" dependenciesKind=\"dependent dependent dependent dependent dependent dependent dependent\"/>
+//     <Residual valueReference=\"17\" dependencies=\"2 6\" dependenciesKind=\"dependent dependent\"/>
+//     <Residual valueReference=\"18\" dependencies=\"0 4 1 5\" dependenciesKind=\"dependent dependent dependent dependent\"/>
+//     <Residual valueReference=\"19\" dependencies=\"0 4 9\" dependenciesKind=\"dependent dependent dependent\"/>
+//   </ModelStructure>
+//   <Annotations>
+//     <Annotation type=\"org.openmodelica.fmi-ls-dae.initial-residuals\">
+//       <InitialResiduals>
+//         <Residual valueReference=\"20\" dependencies=\"0 1\" dependenciesKind=\"dependent dependent\"/>
+//         <Residual valueReference=\"21\" dependencies=\"4\" dependenciesKind=\"dependent\"/>
+//         <Residual valueReference=\"22\" dependencies=\"0 2 3 10\" dependenciesKind=\"dependent dependent dependent dependent\"/>
+//       </InitialResiduals>
+//     </Annotation>
+//   </Annotations>
+// </fmiDAEManifest>"
+// ""
+// 0
+// ""
+// <Float64 name="x1" valueReference="0" description="initialized by the initial equations" initial="approx"  start="1.0"/>
+// <Float64 name="x2" valueReference="1" description="initialized by the initial equations" initial="approx" />
+// <Float64 name="x3" valueReference="2" description="a start value, not an initial residual" initial="exact"  start="3.0"/>
+// <Float64 name="x4" valueReference="3" description="steady state, through an auxiliary" initial="approx" />
+// <Float64 name="der(x1)" valueReference="4" description="der(initialized by the initial equations)"  derivative="0"/>
+// <Float64 name="der(x2)" valueReference="5" description="der(initialized by the initial equations)"  derivative="1"/>
+// <Float64 name="der(x3)" valueReference="6" description="der(a start value, not an initial residual)"  derivative="2"/>
+// <Float64 name="der(x4)" valueReference="7" description="der(steady state, through an auxiliary)"  derivative="3"/>
+// <Float64 name="w" valueReference="8" description="an auxiliary variable of the DAE formulation" />
+// <Float64 name="y" valueReference="9" description="in a linear loop with z" />
+// <Float64 name="z" valueReference="10"  nominal="0.1"/>
+// <Boolean name="_D_daeMode" valueReference="13" causality="structuralParameter" variability="fixed" start="false" description="Set to true to enable DAE mode as defined by FMI-LS-DAE."/>
+// <Float64 name="_D_DAEres0" valueReference="14" causality="local" variability="continuous" initial="calculated" description="DAE-mode residual 0"/>
+// <Float64 name="_D_DAEres1" valueReference="15" causality="local" variability="continuous" initial="calculated" description="DAE-mode residual 1"/>
+// <Float64 name="_D_DAEres2" valueReference="16" causality="local" variability="continuous" initial="calculated" description="DAE-mode residual 2"/>
+// <Float64 name="_D_DAEres3" valueReference="17" causality="local" variability="continuous" initial="calculated" description="DAE-mode residual 3"/>
+// <Float64 name="_D_DAEres4" valueReference="18" causality="local" variability="continuous" initial="calculated" description="DAE-mode residual 4"/>
+// <Float64 name="_D_DAEres5" valueReference="19" causality="local" variability="continuous" initial="calculated" description="DAE-mode residual 5"/>
+// <Float64 name="_D_INITres0" valueReference="20" causality="local" variability="continuous" initial="calculated" description="initial-equation residual x1 + (-2.0) * x2"/>
+// <Float64 name="_D_INITres1" valueReference="21" causality="local" variability="continuous" initial="calculated" description="initial-equation residual $DER.x1"/>
+// <Float64 name="_D_INITres2" valueReference="22" causality="local" variability="continuous" initial="calculated" description="initial-equation residual w - x4"/>
+// 0
+// ""
+// res[0] = (data->localData[0]->realVars[0] /* x1 STATE(1) */) + ((-2.0) * ((data->localData[0]->realVars[1] /* x2 STATE(1) */))); /* x1 + (-2.0) * x2 */
+// res[1] = (data->localData[0]->realVars[4] /* der(x1) STATE_DER */); /* $DER.x1 */
+// res[2] = (data->localData[0]->realVars[8] /* w variable */) - (data->localData[0]->realVars[3] /* x4 STATE(1) */); /* w - x4 */
+// 0
+// ""
+// endResult

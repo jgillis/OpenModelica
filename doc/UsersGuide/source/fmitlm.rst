@@ -50,6 +50,59 @@ specifications.
        ``1.0.0-alpha.1`` draft as of its commit ``e5b8ffa`` (2026-09-11); the
        revision is also reported as a notification when an FMU is exported.
 
+FMI-LS-DAE: initial equations as residuals (OpenModelica extension)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A Model Exchange FMU exported from a ``--daeMode`` model with
+``--simCodeTarget=C+Rust`` carries its DAE formulation as fmi-ls-dae: the
+importer switches the FMU into DAE mode with the structural parameter the
+manifest names (``EnableDAEParameter``), sets the states, their derivatives and
+the algebraic variables, and reads the residuals back. fmi-ls-dae itself says
+nothing about how the model is initialized: in Initialization Mode the FMU runs
+its own causalized initialization.
+
+An importer that treats the initial time as part of its own problem (for
+example a direct-collocation optimizer, with the initial states and their
+derivatives as free decision variables) needs the model's ``initial equation``
+section as residuals instead. OpenModelica exports them as an extension, in a
+vendor annotation of the manifest, which an importer that does not know it
+ignores:
+
+.. code-block:: xml
+
+  <fmiDAEManifest ...>
+    ...
+    </ModelStructure>
+    <Annotations>
+      <Annotation type="org.openmodelica.fmi-ls-dae.initial-residuals">
+        <InitialResiduals>
+          <Residual valueReference="13" dependencies="0 2" dependenciesKind="dependent dependent"/>
+          <Residual valueReference="14" dependencies="4" dependenciesKind="dependent"/>
+        </InitialResiduals>
+      </Annotation>
+    </Annotations>
+  </fmiDAEManifest>
+
+- Each ``Residual`` is one scalar initial equation ``lhs = rhs`` of the
+  model's ``initial equation`` sections, as ``lhs - rhs``, after alias
+  elimination and index reduction. The start values of ``fixed=true``
+  variables, which the initialization adds, are not among them, nor are
+  ``initial algorithm`` sections, ``when``/``if`` initial equations and
+  ``assert`` calls. ``initial()`` is true, ``homotopy(actual, simplified)`` is
+  ``actual``.
+- The value references name ``Float64`` variables ``_D_INITres<i>`` (causality
+  local, variability continuous, initial calculated) in ``modelDescription.xml``,
+  numbered right after the fmi-ls-dae residuals.
+- They are read with ``fmi3GetFloat64`` like the residuals, at the point the
+  importer has set (time, states, derivatives, algebraic variables, inputs and
+  parameters), in Continuous-Time, Event and Initialization Mode. In
+  Initialization Mode the point is the one the FMU's initialization computed, so
+  the residuals are zero there up to its tolerance.
+- ``dependencies`` lists the states, state derivatives, algebraic variables and
+  continuous inputs the residual depends on structurally, including through the
+  auxiliary variables of the DAE formulation; parameters and discrete variables
+  are not listed. A residual without the attributes may depend on every known.
+
 Supported Capability Flags
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
