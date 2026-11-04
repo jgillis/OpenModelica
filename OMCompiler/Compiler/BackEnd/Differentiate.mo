@@ -125,6 +125,9 @@ algorithm
     (eqn, funcs) := differentiateEquation(inEquation, DAE.crefTime, diffData, BackendDAE.DIFFERENTIATION_TIME(), funcs);
     outEquation := SOME(eqn);
     outShared := BackendDAEUtil.setSharedFunctionTree(inShared, funcs);
+    if Flags.getConfigBool(Flags.FMI_INPUT_DERIVATIVES) then
+      (_, outShared) := BackendEquation.traverseExpsOfEquation(eqn, addInputDerivativeVarsExp, outShared);
+    end if;
     if Flags.isSet(Flags.DEBUG_DIFFERENTIATION) then
       BackendDump.debugStrEqnStr("### Result of differentiateEquationTime\n --> ", eqn, "\n");
     end if;
@@ -160,6 +163,9 @@ algorithm
     (dexp, funcs) := differentiateExp(inExp, DAE.crefTime, diffData, BackendDAE.DIFFERENTIATION_TIME(), funcs, defaultMaxIter);
     (outExp, _) := ExpressionSimplify.simplify(dexp);
     outShared := BackendDAEUtil.setSharedFunctionTree(inShared, funcs);
+    if Flags.getConfigBool(Flags.FMI_INPUT_DERIVATIVES) then
+      (_, outShared) := addInputDerivativeVarsExp(outExp, outShared);
+    end if;
     if Flags.isSet(Flags.DEBUG_DIFFERENTIATION) then
       BackendDump.debugStrExpStr("### Result of differentiateExpTime\n --> ", outExp, "n");
     end if;
@@ -175,6 +181,75 @@ algorithm
     fail();
   end try;
 end differentiateExpTime;
+
+public function addInputDerivativeVarsExp
+  "--fmiInputDerivatives: for every cref $DER.u in the expression where u is a
+  top-level Real input, add $DER.u as a new top-level input to the global known
+  variables (once). Differentiation w.r.t. time creates these crefs, see
+  differentiateCrefs."
+  input DAE.Exp inExp;
+  input BackendDAE.Shared inShared;
+  output DAE.Exp outExp = inExp;
+  output BackendDAE.Shared outShared;
+algorithm
+  (_, outShared) := Expression.traverseExpBottomUp(inExp, addInputDerivativeVar, inShared);
+end addInputDerivativeVarsExp;
+
+protected function addInputDerivativeVar
+  input DAE.Exp inExp;
+  input BackendDAE.Shared inShared;
+  output DAE.Exp outExp = inExp;
+  output BackendDAE.Shared outShared = inShared;
+algorithm
+  _ := match inExp
+    local
+      DAE.ComponentRef dcr, cr;
+      BackendDAE.Variables knvars;
+      BackendDAE.Var var;
+    case DAE.CREF(componentRef = dcr as DAE.CREF_QUAL(ident = DAE.derivativeNamePrefix, componentRef = cr))
+      algorithm
+        knvars := BackendDAEUtil.getGlobalKnownVarsFromShared(inShared);
+        if not BackendVariable.containsCref(dcr, knvars) then
+          try
+            (var, _) := BackendVariable.getVarSingle(cr, knvars);
+            true := BackendVariable.isVarOnTopLevelAndInput(var);
+            outShared := BackendVariable.addGlobalKnownVarDAE(makeInputDerivativeVar(dcr, var), inShared);
+          else
+            outShared := inShared;
+          end try;
+        end if;
+      then ();
+    else ();
+  end match;
+end addInputDerivativeVar;
+
+public function makeInputDerivativeVar
+  "The top-level input $DER.u, exported as der(u), for the time derivative of the
+  top-level input u. It starts at 0, the derivative of an input without the flag."
+  input DAE.ComponentRef inDerCref;
+  input BackendDAE.Var inInput;
+  output BackendDAE.Var outVar;
+algorithm
+  outVar := BackendVariable.makeVar(inDerCref);
+  outVar.varType := inInput.varType;
+  outVar.varDirection := DAE.INPUT();
+  outVar.source := inInput.source;
+  outVar.comment := SOME(SCode.COMMENT(NONE(), SOME("time derivative of input " + derCrefStr(inInput.varName))));
+end makeInputDerivativeVar;
+
+protected function derCrefStr
+  "u, der(u), der(der(u)), ... as in modelDescription.xml"
+  input DAE.ComponentRef cr;
+  output String str;
+algorithm
+  str := match cr
+    local
+      DAE.ComponentRef cr1;
+    case DAE.CREF_QUAL(ident = DAE.derivativeNamePrefix, componentRef = cr1)
+      then "der(" + derCrefStr(cr1) + ")";
+    else ComponentReferenceBasics.printComponentRefStr(cr);
+  end match;
+end derCrefStr;
 
 public function differentiateExpSolve
   "Differentiates an expression with respect to inCref."
@@ -1190,6 +1265,16 @@ algorithm
         (zero,_) := Expression.makeZeroExpression(Expression.arrayDimension(tp));
       then
         (zero, inFunctionTree);
+
+    // --fmiInputDerivatives: d(u)/dt of a top-level Real input u is the input $DER.u
+    case ((DAE.CREF(componentRef = cr, ty = tp)), _, BackendDAE.DIFFINPUTDATA(knownVars=SOME(knvars)), BackendDAE.DIFFERENTIATION_TIME())
+      guard Flags.getConfigBool(Flags.FMI_INPUT_DERIVATIVES) and Types.isReal(tp)
+      algorithm
+        (var,_) := BackendVariable.getVarSingle(cr, knvars);
+        true := BackendVariable.isVarOnTopLevelAndInput(var);
+        res := Expression.makeCrefExp(ComponentReference.crefPrefixDer(cr), tp);
+      then
+        (res, inFunctionTree);
 
     // d(discrete)/d(x) = 0
     case ((DAE.CREF(componentRef = cr,ty = tp)), _, BackendDAE.DIFFINPUTDATA(allVars=SOME(timevars)), BackendDAE.DIFFERENTIATION_TIME())

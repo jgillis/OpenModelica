@@ -1461,6 +1461,9 @@ constant ConfigFlag FMU_DIRECTORY = CONFIG_FLAG(171, "fmuDirectory",
 constant ConfigFlag TPL_INTERFACE_DIR = CONFIG_FLAG(172, "tplInterfaceDir",
   NONE(), EXTERNAL(), STRING_FLAG(""), NONE(),
   "Directory searched before the current one for the interface files a Susan\n.tpl imports with 'import interface'.");
+constant ConfigFlag FMI_INPUT_DERIVATIVES = CONFIG_FLAG(173, "fmiInputDerivatives",
+  NONE(), EXTERNAL(), BOOL_FLAG(false), NONE(),
+  "Make der(u) of a top-level input u an additional input der(u) instead of 0, e.g. for x = u with der(x) needed.");
 
 function getFlags
   "Loads the flags with getGlobalRoot. Assumes flags have been loaded."
