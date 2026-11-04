@@ -65,6 +65,7 @@ import Ceval;
 import ComponentReference;
 import ComponentReferenceBasics;
 import Debug;
+import Differentiate;
 import ElementSource;
 import Error;
 import EvaluateFunctions;
@@ -2579,14 +2580,25 @@ algorithm
        exp2 := negateExpression(negated, exp, exp, " PARAMETERALIAS ");
        v := BackendVariable.getVarAt(iVars, i1);
        (replaceable_, replaceble1) := replaceableAlias(v, unReplaceable); // (isreplaceable, isNotInUnreplaceblaHashMap)
-       (vars, eqnslst, shared, repl) := handleSetVar(replaceable_ and replaceble1, SOME(DAE.RCONST(0.0)), v, i1, eqnAttributes, exp2, iMT, iVars, iEqnslst, ishared, iRepl);
+       // der(cr1) is 0, or with --fmiInputDerivatives der(cr2) of a top-level input cr2
+       dexp := DAE.RCONST(0.0);
+       shared := ishared;
+       if Flags.getConfigBool(Flags.FMI_INPUT_DERIVATIVES) and BackendVariable.isStateVar(v) then
+         try
+           (dexp, shared) := Differentiate.differentiateExpTime(exp, iVars, ishared);
+         else
+           dexp := DAE.RCONST(0.0);
+           shared := ishared;
+         end try;
+       end if;
+       (vars, eqnslst, shared, repl) := handleSetVar(replaceable_ and replaceble1, SOME(if negated and not Expression.isZero(dexp) then Expression.negate(dexp) else dexp), v, i1, eqnAttributes, exp2, iMT, iVars, iEqnslst, shared, iRepl);
        expcr := Expression.crefExp(cr1);
        pv := BackendVariable.getVarSharedAt(i2, ishared);
        vsattr := addVarSetAttributes(pv, negated, mark, simpleeqnsarr, EMPTYVARSETATTRIBUTES);
        vsattr := if replaceable_ and replaceble1 then addVarSetAttributes(v, negated, mark, simpleeqnsarr, vsattr) else vsattr;
        rows := List.removeOnTrue(r, intEq, iMT[i1]);
        arrayUpdate(iMT, i1, {});
-       (vars, eqnslst, shared, repl, vsattr) := traverseAliasTree(rows, i1, exp, SOME(expcr), negated, SOME(DAE.RCONST(0.0)), mark, simpleeqnsarr, iMT, unReplaceable, vars, eqnslst, shared, repl, vsattr);
+       (vars, eqnslst, shared, repl, vsattr) := traverseAliasTree(rows, i1, exp, SOME(expcr), negated, SOME(dexp), mark, simpleeqnsarr, iMT, unReplaceable, vars, eqnslst, shared, repl, vsattr);
      then
        (vars, eqnslst, shared, repl);
 
@@ -2625,13 +2637,21 @@ algorithm
        constExp := Expression.isConstValue(exp);
        // add to replacements if constant
        repl := if replaceable_ and constExp and replaceble1 then BackendVarTransform.addReplacement(iRepl, cr, exp, SOME(BackendVarTransform.skipPreChangeEdgeOperator)) else iRepl;
-       // if state der(var) has to replaced to 0
-       repl := if isState then BackendVarTransform.addDerConstRepl(cr, DAE.RCONST(0.0), repl) else repl;
+       // if state der(var) has to replaced to 0 (with --fmiInputDerivatives: to der(exp))
+       dexp := DAE.RCONST(0.0);
+       if isState and not constExp and Flags.getConfigBool(Flags.FMI_INPUT_DERIVATIVES) then
+         try
+           (dexp, shared) := Differentiate.differentiateExpTime(exp, vars, shared);
+         else
+           dexp := DAE.RCONST(0.0);
+         end try;
+       end if;
+       repl := if isState then BackendVarTransform.addDerConstRepl(cr, dexp, repl) else repl;
        exp := Expression.crefExp(cr);
        vsattr := addVarSetAttributes(v, false, mark, simpleeqnsarr, EMPTYVARSETATTRIBUTES);
        rows := List.removeOnTrue(r, intEq, iMT[i]);
        arrayUpdate(iMT, i, {});
-       (vars, eqnslst, shared, repl, vsattr) := traverseAliasTree(rows, i, exp, NONE(), false, SOME(DAE.RCONST(0.0)), mark, simpleeqnsarr, iMT, unReplaceable, vars, eqnslst, shared, repl, vsattr);
+       (vars, eqnslst, shared, repl, vsattr) := traverseAliasTree(rows, i, exp, NONE(), false, SOME(dexp), mark, simpleeqnsarr, iMT, unReplaceable, vars, eqnslst, shared, repl, vsattr);
      then
        (vars, eqnslst, shared, repl);
 
