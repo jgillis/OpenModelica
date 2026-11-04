@@ -63,6 +63,7 @@ protected import ExpressionSimplify;
 protected import Flags;
 protected import FlagsUtil;
 protected import List;
+protected import Types;
 protected import ExpressionBasics;
 
 
@@ -434,10 +435,63 @@ public function inputDerivativesForDynOpt "
 algorithm
   if Config.acceptOptimicaGrammar() or Flags.getConfigBool(Flags.GENERATE_DYN_OPTIMIZATION_PROBLEM) then
     (outDAE, _) := BackendDAEUtil.mapEqSystemAndFold(inDAE, inputDerivativesForDynOptWork, false);
+  elseif Flags.getConfigBool(Flags.FMI_INPUT_DERIVATIVES) then
+    outDAE := inputDerivativesAsInputs(inDAE);
   else
     outDAE := inDAE;
   end if;
 end inputDerivativesForDynOpt;
+
+protected function inputDerivativesAsInputs
+  "--fmiInputDerivatives: replace der(u) of a top-level Real input u written in the
+  model by the new top-level input $DER.u (exported as der(u)). The der(u) that index
+  reduction creates later are handled by Differentiate the same way."
+  input BackendDAE.BackendDAE inDAE;
+  output BackendDAE.BackendDAE outDAE;
+protected
+  BackendDAE.Shared shared = inDAE.shared;
+algorithm
+  for syst in inDAE.eqs loop
+    shared := BackendDAEUtil.traverseBackendDAEExpsEqns(syst.orderedEqs, derInputToInputExp, shared);
+    shared := BackendDAEUtil.traverseBackendDAEExpsEqns(syst.removedEqs, derInputToInputExp, shared);
+  end for;
+  shared := BackendDAEUtil.traverseBackendDAEExpsEqns(shared.initialEqs, derInputToInputExp, shared);
+  shared := BackendDAEUtil.traverseBackendDAEExpsEqns(shared.removedEqs, derInputToInputExp, shared);
+  outDAE := BackendDAE.DAE(inDAE.eqs, shared);
+end inputDerivativesAsInputs;
+
+protected function derInputToInputExp
+  input output DAE.Exp exp;
+  input output BackendDAE.Shared shared;
+algorithm
+  (exp, shared) := Expression.traverseExpBottomUp(exp, derInputToInput, shared);
+end derInputToInputExp;
+
+protected function derInputToInput
+  input output DAE.Exp exp;
+  input output BackendDAE.Shared shared;
+algorithm
+  exp := match exp
+    local
+      DAE.ComponentRef cr;
+      DAE.Type tp;
+      BackendDAE.Var var;
+      DAE.Exp e;
+    case DAE.CALL(path = Absyn.IDENT(name = "der"), expLst = {DAE.CREF(componentRef = cr, ty = tp)})
+      guard Types.isReal(tp)
+      algorithm
+        try
+          (var, _) := BackendVariable.getVarSingle(cr, BackendVariable.daeGlobalKnownVars(shared));
+          true := BackendVariable.isVarOnTopLevelAndInput(var);
+          e := Expression.makeCrefExp(ComponentReference.crefPrefixDer(cr), tp);
+          (e, shared) := Differentiate.addInputDerivativeVarsExp(e, shared);
+        else
+          e := exp;
+        end try;
+      then e;
+    else exp;
+  end match;
+end derInputToInput;
 
 protected function inputDerivativesForDynOptWork "author: "
   input BackendDAE.EqSystem isyst;

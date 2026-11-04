@@ -8897,6 +8897,9 @@ algorithm
       enabledModules := "inputDerivativesForDynOpt"::enabledModules;
       enabledModules := "createDynamicOptimization"::enabledModules;
     end if;
+    if Flags.getConfigBool(Flags.FMI_INPUT_DERIVATIVES) then
+      enabledModules := "inputDerivativesForDynOpt"::enabledModules;
+    end if;
 
     // handle special flags, which disable modules
     if Flags.getConfigString(Flags.REMOVE_SIMPLE_EQUATIONS) == "causal" or
