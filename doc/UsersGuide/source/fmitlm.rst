@@ -165,6 +165,38 @@ fmi-ls-dae ``Residual`` are read off its pattern, so they list the inputs too.
 - If the symbolic Jacobian cannot be generated (a function without derivative,
   for example) the export warns and the FMU declares neither capability.
 
+Derivatives of inputs (``--fmiInputDerivatives``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+An equation that ties a state to an input, ``x = u`` with ``der(x)`` used
+elsewhere, makes the model index 2: index reduction differentiates it to
+``der(x) = der(u)``. An FMI input is piecewise constant, so by default the
+derivative of a top-level input is taken as ``0`` (silently). That is wrong for
+an importer that owns the trajectory of ``u``, e.g. a collocation optimizer that
+has ``u`` and so ``der(u)`` at every point. A boundary condition
+``H[n] = Level_H`` of a channel model is such a case: with ``der(Level_H) = 0``
+the flow out of the last node equals the flow into it.
+
+With ``--fmiInputDerivatives`` the time derivative of a top-level ``Real`` input
+``u`` becomes an additional input of the FMU instead, wherever it arises:
+written in the model, from alias elimination of ``x = u``, or from index
+reduction.
+
+.. code-block:: xml
+
+  <Float64 name="der(u)" valueReference="3" description="time derivative of input u" causality="input" start="0.0"/>
+
+- It is set with ``fmi3SetFloat64`` like any other input, in DAE mode and in ODE
+  mode. Its start value ``0.0`` gives the default behaviour, so an importer
+  that does not know about it gets what it got without the flag.
+- It is a known of the residuals: it is in their ``dependencies`` and a column
+  of the DAE-mode Jacobian, so ``fmi3GetDirectionalDerivative`` and
+  ``fmi3GetAdjointDerivative`` answer for it.
+- Only inputs whose derivative the model needs get one. The second derivative
+  of an input, where index reduction needs it, is ``der(der(u))``.
+- The variable has no ``derivative`` attribute: in Model Exchange that
+  attribute marks a continuous-state derivative.
+
 Supported Capability Flags
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

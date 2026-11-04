@@ -1,0 +1,112 @@
+// name: fmi3_c_daemode_inputder_me.mos
+// keywords: FMI 3.0 export Model Exchange daeMode fmi-ls-dae input derivatives
+// status: correct
+// teardown_command: rm -rf DaeModeInputDer*
+//
+// x = u ties a state to the input u (index 2): x is replaced by u and der(x) by
+// der(u); a^2 = u + 1 is differentiated by index reduction to 2*a*der(a) = der(u).
+// By default the derivative of an input is 0 (an FMI input is piecewise
+// constant), which makes y = u and b = 0. With --fmiInputDerivatives der(u)
+// becomes an additional input der(u) of the FMU (start 0, i.e. the default
+// behaviour), which the importer sets like any other input, e.g. an optimizer
+// that owns the trajectory of u: y = u + der(u), b = der(u)/(2*a). A der(u) the
+// model writes itself (w) is the same input. v is never differentiated and gets
+// no der(v).
+
+setCommandLineOptions("--fmiSources=true --simCodeTarget=C+Rust"); getErrorString();
+loadFile("fmi3_c_daemode_inputder_me.mo"); getErrorString();
+
+// default: der(u) = 0
+buildModelFMU(DaeModeInputDerC, version="3.0", fmuType="me"); getErrorString();
+system("unzip -cqq DaeModeInputDerC.fmu modelDescription.xml | grep -E \"causality=\\\"input\\\"\" | sed \"s/^ *//\""); getErrorString();
+system("unzip -cqq DaeModeInputDerC.fmu sources/DaeModeInputDerC_16dae.c | grep -E \"^ *\\(data->(localData\\[0\\]->realVars|simulationInfo->daeModeData->residualVars)\\[[0-9]+\\]\\)? */\\* (y|b|\\\\\\$DAEres[0-9]+) \" | sed \"s/^ *//\""); getErrorString();
+
+setCommandLineOptions("--fmiInputDerivatives"); getErrorString();
+buildModelFMU(DaeModeInputDerC, version="3.0", fmuType="me"); getErrorString();
+system("unzip -cqq DaeModeInputDerC.fmu modelDescription.xml | grep -E \"causality=\\\"input\\\"\" | sed \"s/^ *//\""); getErrorString();
+system("unzip -cqq DaeModeInputDerC.fmu extra/org.fmi-standard.fmi-ls-dae/fmi-ls-manifest.xml > DaeModeInputDerC_lsdae.xml"); getErrorString();
+readFile("DaeModeInputDerC_lsdae.xml"); getErrorString();
+system("unzip -cqq DaeModeInputDerC.fmu sources/DaeModeInputDerC_16dae.c | grep -E \"^ *\\(data->(localData\\[0\\]->realVars|simulationInfo->daeModeData->residualVars)\\[[0-9]+\\]\\)? */\\* (y|b|\\\\\\$DAEres[0-9]+) \" | sed \"s/^ *//\""); getErrorString();
+// the DAE-mode Jacobian has a column for der(u) (realVars index 3)
+system("unzip -cqq DaeModeInputDerC.fmu sources/DaeModeInputDerC_16dae.c | grep \"const int jacobian\" | sed \"s/^ *//\""); getErrorString();
+
+// der(u) written in the model
+buildModelFMU(DaeModeInputDerWrittenC, version="3.0", fmuType="me"); getErrorString();
+system("unzip -cqq DaeModeInputDerWrittenC.fmu modelDescription.xml | grep -E \"causality=\\\"input\\\"\" | sed \"s/^ *//\""); getErrorString();
+system("unzip -cqq DaeModeInputDerWrittenC.fmu sources/DaeModeInputDerWrittenC.c | grep -E \"^ *\\(data->localData\\[0\\]->realVars\\[[0-9]+\\]\\)? */\\* w \" | sed \"s/^ *//\""); getErrorString();
+
+// Result:
+// true
+// ""
+// true
+// ""
+// "DaeModeInputDerC.fmu"
+// "Notification: The Model Exchange FMU carries a DAE formulation as fmi-ls-dae 1.0.0-alpha.1, implemented against the draft of 2026-09-11 (commit e5b8ffa). fmi-ls-dae is not a released layered standard yet, so an importer written against another revision of the draft may not read the manifest.
+// Notification: Building FMU for platform 'static' (1/1).
+// Notification: Finished FMU for platform 'static' (1/1).
+// "
+// <Float64 name="u" valueReference="6" causality="input"  start="1.0">
+// <Float64 name="v" valueReference="7" description="its derivative is not needed" causality="input"  start="0.0"/>
+// 0
+// ""
+// (data->simulationInfo->daeModeData->residualVars[0]) /* $DAEres1 DAE_RESIDUAL_VAR */ = (data->localData[0]->realVars[7] /* v variable */) + ((data->localData[0]->realVars[6] /* u variable */) - (data->localData[0]->realVars[1] /* der(s) STATE_DER */) - (data->localData[0]->realVars[0] /* s STATE(1) */));
+// (data->localData[0]->realVars[5] /* b variable */) = 0.0;
+// (data->simulationInfo->daeModeData->residualVars[1]) /* $DAEres0 DAE_RESIDUAL_VAR */ = 1.0 + ((data->localData[0]->realVars[6] /* u variable */) - ((tmp0 * tmp0)));
+// 0
+// ""
+// true
+// ""
+// "DaeModeInputDerC.fmu"
+// "Notification: The Model Exchange FMU carries a DAE formulation as fmi-ls-dae 1.0.0-alpha.1, implemented against the draft of 2026-09-11 (commit e5b8ffa). fmi-ls-dae is not a released layered standard yet, so an importer written against another revision of the draft may not read the manifest.
+// Notification: Building FMU for platform 'static' (1/1).
+// Notification: Finished FMU for platform 'static' (1/1).
+// "
+// <Float64 name="der(u)" valueReference="3" description="time derivative of input u" causality="input"  start="0.0"/>
+// <Float64 name="u" valueReference="7" causality="input"  start="1.0">
+// <Float64 name="v" valueReference="8" description="its derivative is not needed" causality="input"  start="0.0"/>
+// 0
+// ""
+// 0
+// ""
+// "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+// <fmiDAEManifest
+//   xmlns:fmi-ls=\"http://fmi-standard.org/fmi-ls-manifest\"
+//   fmi-ls:fmi-ls-name=\"org.fmi-standard.fmi-ls-dae\"
+//   fmi-ls:fmi-ls-version=\"1.0.0-alpha.1\"
+//   fmi-ls:fmi-ls-description=\"Layered standard for DAE support in FMI.\">
+//   <EnableDAEParameter valueReference=\"12\"/>
+//   <AlgebraicVariables>
+//     <AlgebraicVariable valueReference=\"1\"/>
+//     <AlgebraicVariable valueReference=\"5\"/>
+//   </AlgebraicVariables>
+//   <ModelStructure>
+//     <ContinuousStateDerivative valueReference=\"1\" dependencies=\"1\" dependenciesKind=\"constant\"/>
+//     <InitialUnknown valueReference=\"1\"/>
+//     <Residual valueReference=\"13\" dependencies=\"0 1 3 7 8\" dependenciesKind=\"dependent dependent dependent dependent dependent\"/>
+//     <Residual valueReference=\"14\" dependencies=\"5 7\" dependenciesKind=\"dependent dependent\"/>
+//   </ModelStructure>
+// </fmiDAEManifest>"
+// ""
+// (data->localData[0]->realVars[9] /* y variable */) = (data->localData[0]->realVars[7] /* u variable */) + (data->localData[0]->realVars[3] /* der(u) variable */);
+// (data->simulationInfo->daeModeData->residualVars[0]) /* $DAEres1 DAE_RESIDUAL_VAR */ = (data->localData[0]->realVars[8] /* v variable */) + ((data->localData[0]->realVars[9] /* y variable */) - (data->localData[0]->realVars[1] /* der(s) STATE_DER */) - (data->localData[0]->realVars[0] /* s STATE(1) */));
+// (data->localData[0]->realVars[6] /* b variable */) = DIVISION((0.5) * ((data->localData[0]->realVars[3] /* der(u) variable */)),(data->localData[0]->realVars[5] /* a DUMMY_STATE */),"a");
+// (data->simulationInfo->daeModeData->residualVars[1]) /* $DAEres0 DAE_RESIDUAL_VAR */ = 1.0 + ((data->localData[0]->realVars[7] /* u variable */) - ((tmp0 * tmp0)));
+// 0
+// ""
+// const int jacobianColumnIndexes[5] = {0,3,5,7,8};
+// const int jacobianRowIndexes[2] = {0,1};
+// 0
+// ""
+// "DaeModeInputDerWrittenC.fmu"
+// "Notification: Building FMU for platform 'static' (1/1).
+// Notification: Finished FMU for platform 'static' (1/1).
+// "
+// <Float64 name="der(u)" valueReference="3" description="time derivative of input u" causality="input"  start="0.0"/>
+// <Float64 name="u" valueReference="8" causality="input"  start="1.0">
+// <Float64 name="v" valueReference="9" description="its derivative is not needed" causality="input"  start="0.0"/>
+// 0
+// ""
+// (data->localData[0]->realVars[10] /* w variable */) = (2.0) * ((data->localData[0]->realVars[3] /* der(u) variable */));
+// 0
+// ""
+// endResult
