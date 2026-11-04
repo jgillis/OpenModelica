@@ -4249,6 +4249,78 @@ algorithm
   end matchcontinue;
 end createSymbolicSimulationJacobian;
 
+public function initialResidualRowVar
+  "fmi-ls-dae FMU: a placeholder for the row $INITres<k> of the DAE-mode Jacobian,
+   numbered nRes + k and sorting after every residual (compareVarIndexGt)."
+  input SimCodeVar.SimVar residualVar "any residual, as a template";
+  input Integer k;
+  input Integer nRes;
+  output SimCodeVar.SimVar var = residualVar;
+algorithm
+  var.name := DAE.CREF_IDENT("$INITres" + intString(k), DAE.T_REAL_DEFAULT, {});
+  var.comment := "initial residual " + intString(k);
+  var.index := nRes + k;
+  var.variable_index := SOME(intMax(1000000, 4 * nRes) + k);
+end initialResidualRowVar;
+
+public function restrictJacobianPattern
+  "The pattern of the columns keep (0-based, renumbered in that order) and of the
+   rows rowIndex maps to a non-negative index (the row's new number): the
+   residual solve's square block of an fmi-ls-dae FMU's DAE-mode Jacobian,
+   without its input columns and its initial-residual rows."
+  input output SimCode.JacobianMatrix jac;
+  input list<Integer> keep;
+  input list<Integer> rowIndex;
+protected
+  array<Integer> newIndex, newRow;
+  Integer n = 0;
+algorithm
+  newIndex := arrayCreate(listLength(jac.seedVars), -1);
+  for c in keep loop
+    arrayUpdate(newIndex, c + 1, n);
+    n := n + 1;
+  end for;
+  newRow := listArray(rowIndex);
+  jac.seedVars := list(listGet(jac.seedVars, c + 1) for c in keep);
+  jac.sparsity := restrictPattern(jac.sparsity, newIndex, newRow);
+  jac.sparsityT := restrictPattern(jac.sparsityT, newRow, newIndex);
+  jac.nonlinear := restrictPattern(jac.nonlinear, newIndex, newRow);
+  jac.nonlinearT := restrictPattern(jac.nonlinearT, newRow, newIndex);
+  jac.coloredCols := list(c for c guard not listEmpty(c) in list(renumber(color, newIndex) for color in jac.coloredCols));
+  jac.coloredRows := list(c for c guard not listEmpty(c) in list(renumber(color, newRow) for color in jac.coloredRows));
+  jac.maxColorCols := listLength(jac.coloredCols);
+end restrictJacobianPattern;
+
+protected function restrictPattern
+  input SimCode.SparsityPattern pattern;
+  input array<Integer> outerIndex;
+  input array<Integer> innerIndex;
+  output SimCode.SparsityPattern restricted;
+algorithm
+  restricted := List.sort(list((renumberOne(Util.tuple21(e), outerIndex), List.sort(renumber(Util.tuple22(e), innerIndex), intGt))
+    for e guard renumberOne(Util.tuple21(e), outerIndex) >= 0 in pattern), patternEntryGt);
+end restrictPattern;
+
+protected function patternEntryGt
+  input tuple<Integer, list<Integer>> a;
+  input tuple<Integer, list<Integer>> b;
+  output Boolean gt = Util.tuple21(a) > Util.tuple21(b);
+end patternEntryGt;
+
+protected function renumberOne
+  input Integer i;
+  input array<Integer> newIndex;
+  output Integer j = if i >= 0 and i < arrayLength(newIndex) then arrayGet(newIndex, i + 1) else -1;
+end renumberOne;
+
+protected function renumber
+  input list<Integer> cols;
+  input array<Integer> newIndex;
+  output list<Integer> out;
+algorithm
+  out := list(renumberOne(c, newIndex) for c guard renumberOne(c, newIndex) >= 0 in cols);
+end renumber;
+
 public function syncDAEandSimJac
   input SimCode.JacobianMatrix symJac;
   input output SimCode.JacobianMatrix daeJac;

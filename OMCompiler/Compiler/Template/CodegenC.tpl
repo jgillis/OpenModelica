@@ -1184,7 +1184,8 @@ template simulationFile_dae(SimCode simCode)
         daeModeData=SOME(DAEMODEDATA(daeEquations=daeEquations, sparsityPattern=sparsityPattern,
                                      algebraicVars=algebraicVars, residualVars=residualVars,
                                      auxiliaryVars=auxiliaryVars,
-                                     initialResidualEquations=initialResidualEquations))) then
+                                     initialResidualEquations=initialResidualEquations,
+                                     jacobianColumnVars=jacobianColumnVars, jacobianRowIndexes=jacobianRowIndexes))) then
       let modelNamePrefixStr = modelNamePrefix(simCode)
       let initDAEmode =
         match sparsityPattern
@@ -1206,7 +1207,7 @@ template simulationFile_dae(SimCode simCode)
 
       <%evaluateDAEResiduals(daeEquations, fileNamePrefix, fullPathPrefix, modelNamePrefixStr)%>
 
-      <%evaluateInitialDAEResiduals(initialResidualEquations, modelNamePrefixStr)%>
+      <%evaluateInitialDAEResiduals(initialResidualEquations, jacobianColumnVars, jacobianRowIndexes, modelNamePrefixStr)%>
 
       <%initDAEmode%>
 
@@ -5427,12 +5428,16 @@ template evaluateDAEResiduals(list<list<SimEqSystem>> resEquations, String fileN
   >>
 end evaluateDAEResiduals;
 
-template evaluateInitialDAEResiduals(list<SimEqSystem> initialResiduals, String modelNamePrefix)
+template evaluateInitialDAEResiduals(list<SimEqSystem> initialResiduals, list<SimVar> jacobianColumnVars, list<Integer> jacobianRowIndexes, String modelNamePrefix)
  "OpenModelica extension of fmi-ls-dae: the model's initial-equation section as
   residuals lhs - rhs (SimCode DAEMODEDATA.initialResidualEquations), written to
   daeModeData->initialResidualVars. Reads the variables as evaluateDAEResiduals
   does and computes no auxiliary variable itself: the caller evaluates
-  evaluateDAEResiduals at the same point first."
+  evaluateDAEResiduals at the same point first.
+  Its initializer also records the columns of an fmi-ls-dae FMU's DAE-mode
+  Jacobian (DAEMODEDATA.jacobianColumnVars) as daeModeData->jacobianColumnIndexes
+  and the residual of each row (DAEMODEDATA.jacobianRowIndexes) as
+  daeModeData->jacobianRowIndexes."
 ::=
   let &varDecls = buffer ""
   let &varFrees = buffer ""
@@ -5473,6 +5478,32 @@ template evaluateInitialDAEResiduals(list<SimEqSystem> initialResiduals, String 
     <<
     daeModeData->initialResidualVars = NULL;
     daeModeData->evaluateInitialDAEResiduals = NULL;
+    >>%>
+    daeModeData->nJacobianColumns = <%listLength(jacobianColumnVars)%>;
+    <%if intGt(listLength(jacobianColumnVars), 0) then
+    <<
+    {
+      <%genVarIndexes(jacobianColumnVars, "jacobianColumnIndexes")%>
+      daeModeData->jacobianColumnIndexes = (int*) malloc(sizeof(int)*<%listLength(jacobianColumnVars)%>);
+      memcpy(daeModeData->jacobianColumnIndexes, jacobianColumnIndexes, <%listLength(jacobianColumnVars)%>*sizeof(int));
+    }
+    >>
+    else
+    <<
+    daeModeData->jacobianColumnIndexes = NULL;
+    >>%>
+    daeModeData->nJacobianRows = <%listLength(jacobianRowIndexes)%>;
+    <%if intGt(listLength(jacobianRowIndexes), 0) then
+    <<
+    {
+      const int jacobianRowIndexes[<%listLength(jacobianRowIndexes)%>] = {<%jacobianRowIndexes ;separator=","%>};
+      daeModeData->jacobianRowIndexes = (int*) malloc(sizeof(int)*<%listLength(jacobianRowIndexes)%>);
+      memcpy(daeModeData->jacobianRowIndexes, jacobianRowIndexes, <%listLength(jacobianRowIndexes)%>*sizeof(int));
+    }
+    >>
+    else
+    <<
+    daeModeData->jacobianRowIndexes = NULL;
     >>%>
   }
   >>

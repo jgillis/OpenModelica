@@ -990,6 +990,8 @@ end SparsityRow;
       list<SimCodeVar.SimVar> algebraicVars;  // algebraic variable used to calculate residuals of a DAE form, they are real
       list<SimCodeVar.SimVar> auxiliaryVars;  // auxiliary variable used to calculate residuals of a DAE form, they are real
       list<SimEqSystem> initialResidualEquations; // OpenModelica extension of fmi-ls-dae: the initial equations as residuals
+      list<SimCodeVar.SimVar> jacobianColumnVars; // fmi-ls-dae FMU: the variable of each column of the DAE-mode Jacobian
+      list<Integer> jacobianRowIndexes; // fmi-ls-dae FMU: the residual (or nRes + initial residual) of each row
     end DAEMODEDATA;
   end DaeModeData;
 
@@ -1667,6 +1669,11 @@ package SimCodeCodegenUtil
     input SimCode.SimCode simCode;
     output list<tuple<String, String>> residuals;
   end fmi3DaeResiduals;
+
+  function fmi3ProvidesDaeDirectionalDerivatives
+    input SimCode.SimCode simCode;
+    output Boolean b;
+  end fmi3ProvidesDaeDirectionalDerivatives;
 
   function fmi3InitialResiduals
     input SimCode.SimCode simCode;

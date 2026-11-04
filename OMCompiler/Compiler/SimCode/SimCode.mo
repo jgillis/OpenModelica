@@ -399,6 +399,8 @@ uniontype DaeModeData
     list<SimCodeVar.SimVar> auxiliaryVars;
     DaeModeConfig modeCreated; // indicates the mode in which
     list<SimEqSystem> initialResidualEquations "OpenModelica extension of fmi-ls-dae: the initial-equation section as SES_RESIDUALs (res_index 0..n-1), evaluated after the DAE residuals at the same point";
+    list<SimCodeVar.SimVar> jacobianColumnVars "fmi-ls-dae FMU: the variable of each column of the DAE-mode Jacobian (matrix A): the states, the algebraic variables and the inputs, in column order (SymbolicJacobian.daeModeJacobianForFMI); empty otherwise";
+    list<Integer> jacobianRowIndexes "fmi-ls-dae FMU: the residual each row of the DAE-mode Jacobian is: a residual's index, or the number of residuals plus an initial residual's index";
   end DAEMODEDATA;
 end DaeModeData;
 

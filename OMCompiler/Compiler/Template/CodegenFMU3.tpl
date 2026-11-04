@@ -390,8 +390,8 @@ case SIMCODE(__) then
     canBeInstantiatedOnlyOncePerProcess="false"
     canGetAndSetFMUState="true"
     canSerializeFMUState="true"
-    <% if providesDirectionalDerivative(simCode) then 'providesDirectionalDerivatives="true"' else 'providesDirectionalDerivatives="false"'%>
-    providesAdjointDerivatives="false"
+    <% if boolOr(providesDirectionalDerivative(simCode), SimCodeCodegenUtil.fmi3ProvidesDaeDirectionalDerivatives(simCode)) then 'providesDirectionalDerivatives="true"' else 'providesDirectionalDerivatives="false"'%>
+    <% if SimCodeCodegenUtil.fmi3ProvidesDaeDirectionalDerivatives(simCode) then 'providesAdjointDerivatives="true"' else 'providesAdjointDerivatives="false"'%>
     providesPerElementDependencies="false"
     needsCompletedIntegratorStep="true"/>
   >>

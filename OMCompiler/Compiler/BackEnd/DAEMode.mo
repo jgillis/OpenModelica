@@ -76,6 +76,7 @@ import Initialization;
 import List;
 import Matching;
 import StackOverflow;
+import SymbolicJacobian;
 import Util;
 
 public function getEqSystemDAEmode "Run the equation system pipeline."
@@ -149,6 +150,10 @@ algorithm
     // the initial-equation section, before removeInitializationStuff drops it
     outInitialResiduals := createInitialResiduals(simDAE.shared);
     simDAE := Initialization.removeInitializationStuff(simDAE);
+    if SymbolicJacobian.daeModeJacobianForFMI() then
+      // rows of the DAE-mode Jacobian (SymbolicJacobian.symbolicJacobianDAE)
+      simDAE := setInitialResiduals(simDAE, outInitialResiduals);
+    end if;
 
     // post-optimization phase
     // use preOpt instead
@@ -206,6 +211,18 @@ algorithm
   end for;
   residuals := listReverse(residuals);
 end createInitialResiduals;
+
+protected function setInitialResiduals
+  input output BackendDAE.BackendDAE dae;
+  input list<BackendDAE.Equation> residuals;
+protected
+  BackendDAE.Shared shared = dae.shared;
+  BackendDAE.BackendDAEModeData data = shared.daeModeData;
+algorithm
+  data.initialResiduals := residuals;
+  shared.daeModeData := data;
+  dae.shared := shared;
+end setInitialResiduals;
 
 protected function initialEquationResiduals
   "lhs - rhs, as written: equationToScalarResidualForm's createResidualExp

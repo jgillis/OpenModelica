@@ -962,9 +962,11 @@ uniontype BackendDAEModeData
     Integer numResVars;
 
     Option<Variables> modelVars;
+
+    list<Equation> initialResiduals "OpenModelica extension of fmi-ls-dae: the initial-equation section in residual form (DAEMode.createInitialResiduals), rows of the DAE-mode Jacobian of an FMU";
   end BDAE_MODE_DATA;
 end BackendDAEModeData;
-constant BackendDAEModeData emptyDAEModeData = BDAE_MODE_DATA({},{},0,NONE());
+constant BackendDAEModeData emptyDAEModeData = BDAE_MODE_DATA({},{},0,NONE(),{});
 
 annotation(__OpenModelica_Interface="backend_types");
 end BackendDAE;

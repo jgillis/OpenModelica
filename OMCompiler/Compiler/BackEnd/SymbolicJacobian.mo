@@ -215,22 +215,51 @@ end detectSparsePatternODE;
 // Generate symbolic jacobian for DAEMode
 // =============================================================================
 
+public function daeModeJacobianForFMI
+  "Whether the DAE-mode Jacobian is built for an fmi-ls-dae FMU (FMI 3.0, C+Rust
+   runtime), which answers fmi3GetDirectionalDerivative from it: generated
+   symbolically whatever --generateDynamicJacobian says, with the continuous
+   inputs as columns after the states and the algebraic variables, and the
+   initial residuals (an OpenModelica extension) as rows after the residuals."
+  output Boolean b = Flags.getConfigBool(Flags.BUILDING_FMU)
+                     and stringEq(Flags.getConfigString(Flags.FMI_VERSION), "3.0")
+                     and Config.simCodeRustRuntime();
+end daeModeJacobianForFMI;
+
+public function daeModeJacobianInputs
+  "daeModeJacobianForFMI: the input columns of the DAE-mode Jacobian, in column
+   order: the continuous top-level inputs."
+  input BackendDAE.Variables globalKnownVars;
+  output list<BackendDAE.Var> inputs;
+algorithm
+  inputs := List.select(BackendVariable.varList(globalKnownVars), isContinuousTopLevelInput);
+end daeModeJacobianInputs;
+
+protected function isContinuousTopLevelInput
+  input BackendDAE.Var var;
+  output Boolean b = BackendVariable.isVarOnTopLevelAndInput(var) and BackendVariable.isRealVar(var)
+                     and not BackendVariable.isVarDiscrete(var);
+end isContinuousTopLevelInput;
+
 public function symbolicJacobianDAE
   input BackendDAE.BackendDAE inBackendDAE;
   output BackendDAE.BackendDAE outBackendDAE;
 protected
   BackendDAE.BackendDAE DAE;
   BackendDAE.EqSystems eqs;
+  BackendDAE.EqSystem syst;
   BackendDAE.Shared shared;
   BackendDAE.SparseColoring coloredCols;
   BackendDAE.SparsePattern sparsePattern;
   BackendDAE.NonlinearPattern nonlinearPattern;
   list<BackendDAE.Var> inDepVars;
-  list<BackendDAE.Var> depVars;
+  list<BackendDAE.Var> depVars, initResVars;
+  list<BackendDAE.Equation> initResEqs;
   BackendDAE.Variables v, resVars;
   BackendDAE.Variables emptyVars = BackendVariable.emptyVars();
   Option<BackendDAE.SymbolicJacobian> symjac;
   AvlTreePathFunction.Tree funcs;
+  Boolean forFMI = daeModeJacobianForFMI();
   constant Boolean debug = false;
 algorithm
   try
@@ -242,6 +271,16 @@ algorithm
     if debug then execStat(getInstanceName() + "-> copy dae "); end if;
     DAE := BackendDAEOptimize.collapseIndependentBlocks(DAE);
     if debug then execStat(getInstanceName() + "-> collapse blocks "); end if;
+    if forFMI and not listEmpty(inBackendDAE.shared.daeModeData.initialResiduals) then
+      // fmi-ls-dae FMU: the initial residuals as rows $INITres<i> after the
+      // residuals; they exist in this copy only
+      (initResEqs, initResVars) := BackendEquation.convertResidualsIntoSolvedEquations(
+        inBackendDAE.shared.daeModeData.initialResiduals, "$INITres", 0, true);
+      BackendDAE.DAE(eqs = {syst}, shared = shared) := DAE;
+      syst := BackendVariable.addVarsDAE(initResVars, syst);
+      syst := BackendEquation.equationsAddDAE(initResEqs, syst);
+      DAE := BackendDAE.DAE({BackendDAEUtil.clearEqSyst(syst)}, shared);
+    end if;
     DAE := BackendDAEUtil.transformBackendDAE(DAE, SOME((BackendDAE.NO_INDEX_REDUCTION(), BackendDAE.EXACT())), NONE(), NONE());
     if debug then execStat(getInstanceName() + "-> transform backend dae "); end if;
 
@@ -250,30 +289,42 @@ algorithm
     (_, resVars) := BackendVariable.traverseBackendDAEVars(v, BackendVariable.collectVarKindVarinVariables, (BackendVariable.isDAEmodeResVar, emptyVars));
     depVars := BackendVariable.varList(resVars);
 
-    inDepVars := listAppend(shared.daeModeData.stateVars, shared.daeModeData.algStateVars);
+    // fmi-ls-dae FMU: the inputs are knowns the importer differentiates for too
+    inDepVars := listAppend(shared.daeModeData.stateVars, listAppend(shared.daeModeData.algStateVars,
+      if forFMI then daeModeJacobianInputs(shared.globalKnownVars) else {}));
 
     if debug then execStat(getInstanceName() + "-> get all vars "); end if;
 
-    if Flags.getConfigString(Flags.GENERATE_DYNAMIC_JACOBIAN) == "symbolic" then
-      // generate symbolic jacobian and sparsity pattern
-      (symjac, funcs, sparsePattern, coloredCols, nonlinearPattern) := generateGenericJacobian(
-        inBackendDAE          = DAE,
-        inDiffVars            = inDepVars,
-        inStateVars           = BackendVariable.emptyVars(),
-        inInputVars           = BackendVariable.emptyVars(),
-        inParameterVars       = shared.globalKnownVars,
-        inDifferentiatedVars  = resVars,
-        inVars                = BackendVariable.varList(v),
-        inName                = "A",
-        onlySparsePattern     = false,
-        daeMode               = true);
-      if debug then execStat(getInstanceName() + "-> generateGenericJacobian "); end if;
+    symjac := NONE();
+    if forFMI or Flags.getConfigString(Flags.GENERATE_DYNAMIC_JACOBIAN) == "symbolic" then
+      try
+        // generate symbolic jacobian and sparsity pattern
+        (symjac, funcs, sparsePattern, coloredCols, nonlinearPattern) := generateGenericJacobian(
+          inBackendDAE          = DAE,
+          inDiffVars            = inDepVars,
+          inStateVars           = BackendVariable.emptyVars(),
+          inInputVars           = BackendVariable.emptyVars(),
+          inParameterVars       = shared.globalKnownVars,
+          inDifferentiatedVars  = resVars,
+          inVars                = BackendVariable.varList(v),
+          inName                = "A",
+          onlySparsePattern     = false,
+          daeMode               = true);
+        if debug then execStat(getInstanceName() + "-> generateGenericJacobian "); end if;
 
-      shared.symjacs := List.set(shared.symjacs, BackendDAE.SymbolicJacobianAIndex, (symjac, sparsePattern, coloredCols, nonlinearPattern));
-      shared.functionTree := funcs;
+        shared.symjacs := List.set(shared.symjacs, BackendDAE.SymbolicJacobianAIndex, (symjac, sparsePattern, coloredCols, nonlinearPattern));
+        shared.functionTree := funcs;
 
-      if debug then BackendDump.dumpJacobianString(BackendDAE.GENERIC_JACOBIAN(symjac, sparsePattern, coloredCols, nonlinearPattern)); end if;
-    else
+        if debug then BackendDump.dumpJacobianString(BackendDAE.GENERIC_JACOBIAN(symjac, sparsePattern, coloredCols, nonlinearPattern)); end if;
+      else
+        // --generateDynamicJacobian=symbolic asked for it: fail as before; for an
+        // FMU, fall back to the sparsity pattern (no directional derivatives)
+        true := forFMI;
+        Error.addCompilerWarning("The symbolic DAE-mode Jacobian could not be generated, so the FMU provides no directional derivatives.");
+        symjac := NONE();
+      end try;
+    end if;
+    if not isSome(symjac) then
       // only generate sparsity pattern
       (sparsePattern, coloredCols) := generateSparsePattern(DAE, inDepVars, depVars);
       if debug then execStat(getInstanceName() + "-> generateSparsePattern "); end if;

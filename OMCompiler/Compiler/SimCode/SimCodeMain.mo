@@ -59,6 +59,8 @@ import NSimCode; /* used for new backend */
 protected
 import AbsynUtil;
 import Array;
+import BaseHashTable;
+import ComponentReferenceBasics;
 import Autoconf;
 import AvlSetString;
 import BackendDAECreate;
@@ -2273,6 +2275,14 @@ protected
   BackendDAE.SparsePattern daeModeSparsity;
   BackendDAE.SparseColoring daeModeColoring;
   BackendDAE.NonlinearPattern nonlinearPattern;
+  Boolean symbolicDAEJac;
+  list<DAE.ComponentRef> daeJacColumns;
+  list<SimCodeVar.SimVar> jacobianColumnVars = {};
+  list<Integer> jacobianRowIndexes = {};
+  list<DAE.ComponentRef> daeJacRows;
+  list<SimCodeVar.SimVar> initResidualRowVars;
+  list<DAE.ComponentRef> inputCrefs;
+  list<Integer> keepCols;
 
   SimCode.JacobianMatrix symDAESparsPattern;
   list<SimCode.JacobianMatrix> symJacs, SymbolicJacs, SymbolicJacsNLS, SymbolicJacsTemp;
@@ -2388,8 +2398,10 @@ algorithm
     // and they are not present in DAEmode
 
     // create DAE mode Sparse pattern and TODO: Jacobians
-    // sparsity pattern generation
-    if Flags.getConfigString(Flags.GENERATE_DYNAMIC_JACOBIAN) == "symbolic" then
+    // sparsity pattern generation; an fmi-ls-dae FMU always has the symbolic one
+    // (SymbolicJacobian.symbolicJacobianDAE)
+    symbolicDAEJac := Flags.getConfigString(Flags.GENERATE_DYNAMIC_JACOBIAN) == "symbolic" or SymbolicJacobian.daeModeJacobianForFMI();
+    if symbolicDAEJac then
       // create symbolic jacobian (like nls systems!)
       (daeModeJac, daeModeSparsity, daeModeColoring, nonlinearPattern) := listGet(inBackendDAE.shared.symjacs, BackendDAE.SymbolicJacobianAIndex);
       if isSome(inBackendDAE.shared.dataReconciliationData) then
@@ -2489,12 +2501,46 @@ algorithm
     // the A matrix will be used symbolically
     // (also the A matrix sparsity pattern seems to be faulty so we use this one instead)
     daeModeJacobian := listGet(inBackendDAE.shared.symjacs, BackendDAE.SymbolicJacobianAIndex);
+    // An fmi-ls-dae FMU's DAE-mode Jacobian has the initial residuals as rows
+    // $INITres<k> (SymbolicJacobian.symbolicJacobianDAE), which are no model
+    // variables: placeholders numbered after the residuals let the matrix
+    // number them as rows after the residuals.
+    if SymbolicJacobian.daeModeJacobianForFMI() and not listEmpty(residualVars) then
+      initResidualRowVars := list(SimCodeUtil.initialResidualRowVar(listHead(residualVars), k, listLength(residualVars)) for k in 0:listLength(inInitialResiduals)-1);
+      crefToSimVarHT := List.fold(initResidualRowVars, HashTableCrefSimVar.addSimVarToHashTable, crefToSimVarHT);
+    end if;
     ({symDAESparsPattern}, uniqueEqIndex) := SimCodeUtil.createSymbolicJacobianssSimCode({daeModeJacobian}, crefToSimVarHT, uniqueEqIndex, {"daeMode"}, {});
     daeModeSP := SOME(symDAESparsPattern);
 
     // copy the sparsity pattern to the A jacobian
-    if Flags.getConfigString(Flags.GENERATE_DYNAMIC_JACOBIAN) == "symbolic" then
+    if symbolicDAEJac then
      SymbolicJacs := list(SimCodeUtil.syncDAEandSimJac(symjac, symDAESparsPattern) for symjac in SymbolicJacs);
+    end if;
+
+    // fmi-ls-dae FMU: the DAE-mode Jacobian has the inputs as columns besides the
+    // states and the algebraic variables, and the initial residuals as rows besides
+    // the residuals (SymbolicJacobian.symbolicJacobianDAE). The pattern of
+    // daeModeData (the residual solve's) keeps the square block.
+    if SymbolicJacobian.daeModeJacobianForFMI() then
+      // the columns as the daeMode pattern above (and so matrix A after
+      // syncDAEandSimJac) numbers them, the rows as matrix A's own result variables
+      (_, (_, _, (daeJacColumns, daeJacRows), _), _, _) := daeModeJacobian;
+      jacobianColumnVars := List.sort(SimCodeUtil.getSimVars2Crefs(daeJacColumns, crefToSimVarHT), SimCodeUtil.compareVarIndexGt);
+      daeJacColumns := list(v.name for v in jacobianColumnVars);
+      inputCrefs := list(BackendVariable.varCref(v) for v in SymbolicJacobian.daeModeJacobianInputs(inBackendDAE.shared.globalKnownVars));
+      keepCols := {};
+      resIndex := 0;
+      for cr in daeJacColumns loop
+        if not List.isMemberOnTrue(cr, inputCrefs, ComponentReferenceBasics.crefEqual) then
+          keepCols := resIndex :: keepCols;
+        end if;
+        resIndex := resIndex + 1;
+      end for;
+      // a row is residual i (its index) or initial residual k (nRes + k), in the
+      // order createSymbolicJacobianssSimCode numbers them
+      jacobianRowIndexes := list(v.index for v in List.sort(SimCodeUtil.getSimVars2Crefs(daeJacRows, crefToSimVarHT), SimCodeUtil.compareVarIndexGt));
+      daeModeSP := SOME(SimCodeUtil.restrictJacobianPattern(symDAESparsPattern, listReverse(keepCols),
+        list(i for i in 0:listLength(residualVars)-1)));
     end if;
 
     daeModeConf := SimCode.ALL_EQUATIONS();
@@ -2510,7 +2556,7 @@ algorithm
     end for;
     initialResidualEquations := listReverse(initialResidualEquations);
 
-    daeModeData := SOME(SimCode.DAEMODEDATA(daeEquations, daeModeSP, residualVars, algebraicStateVars, auxiliaryVars, daeModeConf, initialResidualEquations));
+    daeModeData := SOME(SimCode.DAEMODEDATA(daeEquations, daeModeSP, residualVars, algebraicStateVars, auxiliaryVars, daeModeConf, initialResidualEquations, jacobianColumnVars, jacobianRowIndexes));
 
     /* This is a *much* better estimate than the guessed number of equations */
     modelInfo := SimCodeUtil.addNumEqns(modelInfo, uniqueEqIndex - listLength(jacobianEquations));

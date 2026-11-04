@@ -2121,54 +2121,103 @@ algorithm
   vr := String(stringInt(getFMI3TimeValueReference(simCode)) + simCode.modelInfo.varInfo.numZeroCrossings + 1);
 end getFMI3DaeModeValueReference;
 
+public function fmi3DaeModeJacobian
+  "fmi-ls-dae: the DAE-mode Jacobian, matrix A of a --daeMode model:
+   dF/d(x, z, u) + cj*dF/dx' (Differentiate: der(x) to $DAE_CJ * x.Seed), with the
+   inputs as columns after the states and the algebraic variables
+   (DAEMODEDATA.jacobianInputVars) and the initial residuals as rows after the
+   residuals where the FMU has any (SymbolicJacobian.daeModeJacobianForFMI). Its
+   columns are empty when only the pattern was generated."
+  input SimCode.SimCode simCode;
+  output Option<SimCode.JacobianMatrix> jac = NONE();
+algorithm
+  if isSome(simCode.daeModeData) then
+    for jm in simCode.jacobianMatrices loop
+      if jm.matrixName == "A" then
+        jac := SOME(jm);
+        return;
+      end if;
+    end for;
+  end if;
+end fmi3DaeModeJacobian;
+
+public function fmi3ProvidesDaeDirectionalDerivatives
+  "fmi-ls-dae: whether a --daeMode Model Exchange FMU answers
+   fmi3GetDirectionalDerivative and fmi3GetAdjointDerivative from its symbolic
+   DAE-mode Jacobian (fmi3DaeModeJacobian)."
+  input SimCode.SimCode simCode;
+  output Boolean b;
+algorithm
+  b := match (fmi3DaeModeJacobian(simCode), simCode.daeModeData)
+    local SimCode.JacobianMatrix jm; SimCode.DaeModeData dmd;
+    case (SOME(jm), SOME(dmd)) guard Config.simCodeRustRuntime() then not jacobianColumnsAreEmpty(jm.columns)
+      and not listEmpty(dmd.jacobianColumnVars) and listLength(jm.seedVars) == listLength(dmd.jacobianColumnVars);
+    else false;
+  end match;
+end fmi3ProvidesDaeDirectionalDerivatives;
+
 public function fmi3DaeResiduals
   "fmi-ls-dae: the residuals of a --daeMode model as (valueReference, dependency
    attributes): the value references follow the DAE-mode switch's, and the
    dependencies and dependenciesKind attributes of each <Residual> are read
-   off the rows of the DAE-mode Jacobian's transposed sparsity. A state column
-   stands for the state and its derivative both, since DAE-mode differentiation
-   folds der(x) into x ($cj * x.Seed); the other columns are the algebraic
-   variables. No attributes without a pattern, which the standard reads as a
-   dependency on every known."
+   off the rows of the DAE-mode Jacobian's transposed sparsity: of the full
+   matrix A of an fmi-ls-dae FMU (fmi3DaeModeJacobian), whose columns are
+   DAEMODEDATA.jacobianColumnVars (inputs among them), else of daeModeData's
+   pattern, whose columns are the states then the algebraic variables. A state
+   column stands for the state and its derivative both, since DAE-mode
+   differentiation folds der(x) into x ($cj * x.Seed). No attributes without a
+   pattern, which the standard reads as a dependency on every known."
   input SimCode.SimCode simCode;
   output list<tuple<String, String>> residuals = {};
 protected
   SimCode.DaeModeData dmd;
-  Option<list<list<Integer>>> rows;
-  list<list<Integer>> rest;
+  Option<SimCode.JacobianMatrix> pattern = NONE();
+  SimCode.JacobianMatrix jm;
+  array<list<Integer>> rows;
+  array<Integer> rowIndex = arrayCreate(0, 0);
   list<Integer> cols;
-  array<String> stateVRs, algebraicVRs;
-  Integer numStates, daeModeVR;
+  array<list<String>> colVRs;
+  list<SimCodeVar.SimVar> colVars = {};
+  Integer numStates, daeModeVR, i;
   String vr, attributes;
   list<String> acc;
 algorithm
   SOME(dmd) := simCode.daeModeData;
   daeModeVR := stringInt(getFMI3DaeModeValueReference(simCode));
-  rows := match dmd.sparsityPattern
-    local SimCode.JacobianMatrix jm;
-    case SOME(jm) then SOME(list(Util.tuple22(e) for e in jm.sparsityT));
-    else NONE();
-  end match;
   numStates := numScalarElems(simCode.modelInfo.vars.stateVars);
-  stateVRs := listArray(list(getFMI3ValueReference(v, simCode) for v in simCode.modelInfo.vars.stateVars));
-  algebraicVRs := listArray(list(getFMI3ValueReference(v, simCode) for v in dmd.algebraicVars));
+  if not listEmpty(dmd.jacobianColumnVars) then
+    pattern := fmi3DaeModeJacobian(simCode);
+    colVars := dmd.jacobianColumnVars;
+    // matrix A carries the daeMode pattern's numbering (syncDAEandSimJac): its
+    // rows are the residuals by index
+    rowIndex := listArray(list(i for i in 0:listLength(dmd.residualVars)-1));
+  end if;
+  if not isSome(pattern) then
+    pattern := dmd.sparsityPattern;
+    colVars := listAppend(simCode.modelInfo.vars.stateVars, dmd.algebraicVars);
+    rowIndex := listArray(list(i for i in 0:listLength(dmd.residualVars)-1));
+  end if;
+  // the value references a column stands for
+  colVRs := listArray(list(fmi3DaeColumnVRs(v, numStates, simCode) for v in colVars));
+  rows := arrayCreate(listLength(dmd.residualVars), {});
+  if isSome(pattern) then
+    SOME(jm) := pattern;
+    for e in jm.sparsityT loop
+      (i, cols) := e;
+      i := if i < arrayLength(rowIndex) then arrayGet(rowIndex, i + 1) else -1;
+      if i >= 0 and i < arrayLength(rows) then
+        arrayUpdate(rows, i + 1, cols);
+      end if;
+    end for;
+  end if;
+  i := 0;
   for var in dmd.residualVars loop
     attributes := "";
-    if isSome(rows) then
-      SOME(rest) := rows;
-      if listEmpty(rest) then
-        cols := {};
-      else
-        cols := listHead(rest);
-        rows := SOME(listRest(rest));
-      end if;
+    if isSome(pattern) then
       acc := {};
-      for c in cols loop
-        if c < numStates then
-          vr := arrayGet(stateVRs, c + 1);
-          acc := String(stringInt(vr) + numStates) :: vr :: acc;
-        else
-          acc := arrayGet(algebraicVRs, c - numStates + 1) :: acc;
+      for c in List.sort(arrayGet(rows, i + 1), intGt) loop
+        if c < arrayLength(colVRs) then
+          acc := List.append_reverse(arrayGet(colVRs, c + 1), acc);
         end if;
       end for;
       acc := listReverse(acc);
@@ -2176,9 +2225,27 @@ algorithm
         + stringDelimitList(list("dependent" for s in acc), " ") + "\"";
     end if;
     residuals := (String(daeModeVR + 1 + var.index), attributes) :: residuals;
+    i := i + 1;
   end for;
   residuals := listReverse(residuals);
 end fmi3DaeResiduals;
+
+protected function fmi3DaeColumnVRs
+  "fmi3DaeResiduals: a state column is the state and its derivative (whose value
+   reference is the state's plus the number of states), any other column its
+   variable."
+  input SimCodeVar.SimVar var;
+  input Integer numStates;
+  input SimCode.SimCode simCode;
+  output list<String> vrs;
+protected
+  String vr = getFMI3ValueReference(var, simCode);
+algorithm
+  vrs := match var.varKind
+    case BackendDAE.STATE() then {vr, String(stringInt(vr) + numStates)};
+    else {vr};
+  end match;
+end fmi3DaeColumnVRs;
 
 public function fmi3InitialResiduals
   "OpenModelica extension of fmi-ls-dae: the initial equations as residuals

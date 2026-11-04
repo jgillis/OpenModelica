@@ -620,6 +620,13 @@ typedef struct DAEMODE_DATA
   long nInitialResidualVars;           /* number of initial residuals */
   modelica_real* initialResidualVars;  /* workspace for the initial residuals */
   int (*evaluateInitialDAEResiduals)(DATA*, threadData_t*); /* NULL without initial residuals */
+  /* fmi-ls-dae FMU: the variable of each column of the DAE-mode Jacobian
+   * (analyticJacobians[INDEX_JAC_A]): the states, the algebraic variables and the
+   * inputs */
+  long nJacobianColumns;               /* number of columns, 0 without the Jacobian */
+  int *jacobianColumnIndexes;          /* realVars index of each column's variable */
+  long nJacobianRows;                  /* number of rows */
+  int *jacobianRowIndexes;             /* each row's residual: i, or nResidualVars + k for initial residual k */
 } DAEMODE_DATA;
 
 typedef struct INLINE_DATA

@@ -1068,7 +1068,9 @@ public
         algebraicVars   = SimVar.SimVar.convertList(data.algebraicVars),
         auxiliaryVars   = SimVar.SimVar.convertList(data.auxiliaryVars),
         modeCreated     = convertMode(data.modeCreated),
-        initialResidualEquations = {});
+        initialResidualEquations = {},
+        jacobianColumnVars = {},
+        jacobianRowIndexes = {});
     end convert;
 
   protected
